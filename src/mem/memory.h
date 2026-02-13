@@ -10,7 +10,8 @@
 // Unified RAM model (on-chip SRAM + DDR3 merged into flat array)
 // Replaces the following GamingCPU RTL: sram_dualport.sv, MIG DDR3 controller, cache hierarchy
 // Supports TLM blocking transport and DMI for zero-copy access
-class Memory : public sc_core::sc_module {
+class Memory : public sc_core::sc_module
+{
 public:
     tlm_utils::simple_target_socket<Memory> tsock;
 
@@ -22,13 +23,13 @@ public:
     uint32_t get_size() const { return size_; }
 
     // Direct pointer access for ELF loading and test harnesses slop
-    uint8_t* data() { return mem_.data(); }
-    const uint8_t* data() const { return mem_.data(); }
+    uint8_t *data() { return mem_.data(); }
+    const uint8_t *data() const { return mem_.data(); }
 
 private:
-    void b_transport(tlm::tlm_generic_payload& trans, sc_core::sc_time& delay);
-    bool get_direct_mem_ptr(tlm::tlm_generic_payload& trans,
-                            tlm::tlm_dmi& dmi_data);
+    void b_transport(tlm::tlm_generic_payload &trans, sc_core::sc_time &delay);
+    bool get_direct_mem_ptr(tlm::tlm_generic_payload &trans,
+                            tlm::tlm_dmi &dmi_data);
 
     uint32_t base_addr_;
     uint32_t size_;
