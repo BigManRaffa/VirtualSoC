@@ -1,0 +1,23 @@
+# Build artifacts
+build/
+cmake-build-*/
+
+# SystemC dependency build
+deps/systemc-*/
+deps/systemc-install/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Compiled objects
+*.o
+*.a
+*.so
+*.dylib
+
+# OS
+.DS_Store
+Thumbs.db
