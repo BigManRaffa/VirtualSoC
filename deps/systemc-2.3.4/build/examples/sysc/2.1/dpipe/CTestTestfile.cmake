@@ -1,0 +1,8 @@
+# CMake generated Testfile for 
+# Source directory: /mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-2.3.4/examples/sysc/2.1/dpipe
+# Build directory: /mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-2.3.4/build/examples/sysc/2.1/dpipe
+# 
+# This file includes the relevant testing commands required for 
+# testing this directory and lists subdirectories to be tested as well.
+add_test(examples/sysc/2.1/dpipe/dpipe "/usr/bin/cmake" "-DTEST_EXE=/mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-2.3.4/build/examples/sysc/2.1/dpipe/dpipe" "-DTEST_DIR=/mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-2.3.4/build/examples/sysc/2.1/dpipe" "-DTEST_INPUT=" "-DTEST_GOLDEN=/mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-2.3.4/examples/sysc/2.1/dpipe/golden.log" "-DTEST_FILTER=" "-DDIFF_COMMAND=/usr/bin/diff" "-DDIFF_OPTIONS=-u" "-P" "/mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-2.3.4/cmake/run_test.cmake")
+set_tests_properties(examples/sysc/2.1/dpipe/dpipe PROPERTIES  FAIL_REGULAR_EXPRESSION "^[*][*][*]ERROR" _BACKTRACE_TRIPLES "/mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-2.3.4/examples/CMakeLists.txt;137;add_test;/mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-2.3.4/examples/sysc/2.1/dpipe/CMakeLists.txt;44;configure_and_add_test;/mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-2.3.4/examples/sysc/2.1/dpipe/CMakeLists.txt;0;")
