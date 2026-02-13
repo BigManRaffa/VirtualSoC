@@ -59,9 +59,12 @@ find_package(Threads REQUIRED)
 # Built incrementally: add source files as modules are implemented
 
 set(VP_SOURCES
-    # Memory subsystem
+    # Step 1: Memory subsystem
     src/mem/memory.cpp
     src/mem/bootrom.cpp
+
+    # Step 2: Bus
+    src/bus/tlm_bus.cpp
 
     # Entry point
     src/main.cpp
@@ -70,6 +73,7 @@ set(VP_SOURCES
 set(VP_HEADERS
     src/mem/memory.h
     src/mem/bootrom.h
+    src/bus/tlm_bus.h
     src/platform/platform_config.h
 )
 

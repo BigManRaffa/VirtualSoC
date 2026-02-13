@@ -1,0 +1,3 @@
+/mnt/c/Users/anime/Desktop/Programming/VirtualSoC/build/CMakeFiles/gamingcpu-vp.dir
+/mnt/c/Users/anime/Desktop/Programming/VirtualSoC/build/CMakeFiles/edit_cache.dir
+/mnt/c/Users/anime/Desktop/Programming/VirtualSoC/build/CMakeFiles/rebuild_cache.dir
