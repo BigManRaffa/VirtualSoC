@@ -13,6 +13,7 @@
 #include "platform/platform_config.h"
 #include "cpu/decode.h"
 #include "cpu/rv32_defs.h"
+#include "cpu/csr.h"
 
 static int pass_count = 0;
 static int fail_count = 0;
@@ -344,11 +345,107 @@ struct TestInitiator : public sc_core::sc_module {
         }
     }
 
+    void step5_csr() {
+        std::cout << "\nStep 5: CSR File\n";
+        using namespace rv32;
+
+        CSRFile csr;
+
+        // misa should be initialized to RV32IMACSU
+        uint32_t val = 0;
+        check(csr.read(CSR_MISA, PRV_M, val) && val == MISA_VALUE, "misa = RV32IMACSU");
+
+        // Read-only info CSRs
+        csr.read(CSR_MVENDORID, PRV_M, val);
+        check(val == 0, "mvendorid = 0");
+        csr.read(CSR_MHARTID, PRV_M, val);
+        check(val == 0, "mhartid = 0");
+
+        // Write/read mstatus
+        csr.write(CSR_MSTATUS, PRV_M, MSTATUS_MIE | MSTATUS_MPIE);
+        csr.read(CSR_MSTATUS, PRV_M, val);
+        check((val & MSTATUS_MIE) != 0, "mstatus.MIE set");
+        check((val & MSTATUS_MPIE) != 0, "mstatus.MPIE set");
+
+        // mstatus MPP WARL: value 2 is illegal -> forced to 0
+        csr.write(CSR_MSTATUS, PRV_M, (2u << 11));
+        csr.read(CSR_MSTATUS, PRV_M, val);
+        check(((val >> 11) & 0x3) != 2, "mstatus.MPP rejects illegal value 2");
+
+        // mstatus MPP = M(3) is legal
+        csr.write(CSR_MSTATUS, PRV_M, (3u << 11));
+        csr.read(CSR_MSTATUS, PRV_M, val);
+        check(((val >> 11) & 0x3) == 3, "mstatus.MPP = M allowed");
+
+        // Write/read mtvec, mepc, mcause, mscratch
+        csr.write(CSR_MTVEC, PRV_M, 0x80000100);
+        csr.read(CSR_MTVEC, PRV_M, val);
+        check(val == 0x80000100, "mtvec write/read");
+
+        csr.write(CSR_MEPC, PRV_M, 0x80000005);
+        csr.read(CSR_MEPC, PRV_M, val);
+        check(val == 0x80000004, "mepc bit 0 cleared");
+
+        csr.write(CSR_MSCRATCH, PRV_M, 0xDEADBEEF);
+        csr.read(CSR_MSCRATCH, PRV_M, val);
+        check(val == 0xDEADBEEF, "mscratch write/read");
+
+        // mip: hardware bits
+        csr.set_mip_mtip(true);
+        check((csr.get_mip() & MIP_MTIP) != 0, "mip.MTIP set by hardware");
+        csr.set_mip_mtip(false);
+        check((csr.get_mip() & MIP_MTIP) == 0, "mip.MTIP cleared");
+
+        csr.set_mip_meip(true);
+        check((csr.get_mip() & MIP_MEIP) != 0, "mip.MEIP set");
+
+        // mip: software can only write SSIP
+        csr.write(CSR_MIP, PRV_M, 0xFFFFFFFF);
+        check((csr.get_mip() & MIP_SSIP) != 0, "mip SSIP writable by software");
+        check((csr.get_mip() & MIP_MSIP) == 0, "mip MSIP not writable by software");
+
+        // Supervisor CSRs
+        csr.write(CSR_STVEC, PRV_S, 0x80001000);
+        csr.read(CSR_STVEC, PRV_S, val);
+        check(val == 0x80001000, "stvec write/read from S-mode");
+
+        // sstatus is a view of mstatus
+        csr.write(CSR_MSTATUS, PRV_M, MSTATUS_SIE | MSTATUS_MIE);
+        csr.read(CSR_SSTATUS, PRV_S, val);
+        check((val & (1 << 1)) != 0, "sstatus.SIE reflects mstatus");
+        check((val & (1 << 3)) == 0, "sstatus doesn't expose MIE");
+
+        // Privilege violation: S-mode can't read M-mode CSR
+        check(!csr.read(CSR_MSTATUS, PRV_S, val), "S-mode can't read mstatus");
+        check(!csr.read(CSR_MTVEC, PRV_S, val), "S-mode can't read mtvec");
+
+        // Read-only CSR write rejected
+        check(!csr.write(CSR_MVENDORID, PRV_M, 42), "can't write mvendorid");
+
+        // mcycle / minstret
+        csr.inc_mcycle();
+        csr.inc_mcycle();
+        csr.inc_minstret();
+        csr.read(CSR_MCYCLE, PRV_M, val);
+        check(val == 2, "mcycle incremented to 2");
+        csr.read(CSR_MINSTRET, PRV_M, val);
+        check(val == 1, "minstret incremented to 1");
+
+        // satp callback
+        bool flushed = false;
+        csr.on_satp_write = [&]() { flushed = true; };
+        csr.write(CSR_SATP, PRV_S, 0x80012345);
+        check(flushed, "satp write triggers callback");
+        csr.read(CSR_SATP, PRV_S, val);
+        check(val == 0x80012345, "satp write/read");
+    }
+
     void run_tests() {
         step1_memory();
         step2_bus();
         step3_rv32_defs();
         step4_decoder();
+        step5_csr();
         sc_core::sc_stop();
     }
 };

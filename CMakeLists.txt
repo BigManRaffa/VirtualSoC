@@ -69,6 +69,9 @@ set(VP_SOURCES
     # Steps 3-4: CPU decoder
     src/cpu/decode.cpp
 
+    # Step 5: CSR file
+    src/cpu/csr.cpp
+
     # Entry point
     src/main.cpp
 )
