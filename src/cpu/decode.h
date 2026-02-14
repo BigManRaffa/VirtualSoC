@@ -82,7 +82,7 @@ enum class InstrType
     ECALL, EBREAK, MRET, SRET, URET, WFI, SFENCE_VMA,
 
     // System, CSR
-    CSRRW, CSRRS, CSRRC, CSRRWI, CSRRSI, SRRCI,
+    CSRRW, CSRRS, CSRRC, CSRRWI, CSRRSI, CSRRCI,
 
     // System, Fence
     FENCE, FENCEI,

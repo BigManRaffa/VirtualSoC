@@ -18,6 +18,8 @@
 #include "cpu/rv32m.h"
 #include "cpu/rv32a.h"
 #include "cpu/trap.h"
+#include "cpu/iss.h"
+#include "cpu/iss.h"
 
 static int pass_count = 0;
 static int fail_count = 0;
@@ -51,6 +53,8 @@ struct TestInitiator : public sc_core::sc_module {
     tlm_utils::simple_initiator_socket<TestInitiator> mem_isock;
     tlm_utils::simple_initiator_socket<TestInitiator> rom_isock;
     tlm_utils::simple_initiator_socket<TestInitiator> bus_isock;
+
+    ISS* iss_ptr = nullptr;
 
     SC_HAS_PROCESS(TestInitiator);
 
@@ -1306,6 +1310,48 @@ struct TestInitiator : public sc_core::sc_module {
         }
     }
 
+    void step9_iss() {
+        std::cout << "\nStep 9: ISS\n";
+        using namespace rv32;
+
+        // ISS SC_THREAD runs automatically; wait for it to finish
+        wait(sc_core::sc_time(1, sc_core::SC_US));
+
+        auto& s = iss_ptr->state;
+
+        check(iss_ptr->insn_count == 10, "ISS executed 10 instructions");
+        check(s.get_regu(1) == 0x80000000, "ISS x1 = 0x80000000 (LUI)");
+        check(s.get_reg(2) == 42, "ISS x2 = 42 (ADDI)");
+        check(s.get_reg(3) == 10, "ISS x3 = 10 (ADDI)");
+        check(s.get_reg(4) == 52, "ISS x4 = 52 (ADD)");
+        check(s.get_reg(5) == 52, "ISS x5 = 52 (LW read-back)");
+        check(s.get_reg(6) == 1, "ISS x6 = 1 (BNE taken, skipped 99)");
+        check(s.get_reg(7) == 7, "ISS x7 = 7 (C.LI compressed)");
+        check(s.pc == cfg::RAM_BASE + 0x26, "ISS pc at C.EBREAK");
+        check(s.priv == PRV_M, "ISS still in M-mode");
+
+        // Verify counters
+        {
+            uint32_t cyc = 0, inst = 0;
+            s.csr.read(CSR_MCYCLE, PRV_M, cyc);
+            s.csr.read(CSR_MINSTRET, PRV_M, inst);
+            check(cyc == 10, "ISS mcycle = 10");
+            check(inst == 10, "ISS minstret = 10");
+        }
+
+        // Verify the SW wrote through TLM to memory
+        {
+            uint32_t mem_val = 0;
+            tlm::tlm_generic_payload trans;
+            sc_core::sc_time delay = sc_core::SC_ZERO_TIME;
+            setup_trans(trans, tlm::TLM_READ_COMMAND,
+                        cfg::RAM_BASE + 0x100,
+                        reinterpret_cast<uint8_t*>(&mem_val), 4);
+            bus_isock->b_transport(trans, delay);
+            check(mem_val == 52, "ISS SW stored 52 via TLM bus");
+        }
+    }
+
     void run_tests() {
         step1_memory();
         step2_bus();
@@ -1314,6 +1360,7 @@ struct TestInitiator : public sc_core::sc_module {
         step5_csr();
         step6_execute();
         step7_trap();
+        step9_iss();
         sc_core::sc_stop();
     }
 };
@@ -1350,6 +1397,38 @@ int sc_main(int, char*[])
     bus.map(cfg::SRAM_BASE, cfg::SRAM_SIZE);
     bus.isock.bind(ram.tsock);
     bus.map(cfg::RAM_BASE, 0x100000);
+
+    // Step 9: ISS wired through bus to RAM
+    ISS iss("iss", cfg::RAM_BASE);
+    iss.stop_on_ebreak = true;
+    iss.isock.bind(bus.tsock);
+    tester.iss_ptr = &iss;
+
+    // Load test program into RAM:
+    //   0x00: lui x1, 0x80000        ; x1 = 0x80000000
+    //   0x04: addi x2, x0, 42       ; x2 = 42
+    //   0x08: addi x3, x0, 10       ; x3 = 10
+    //   0x0C: add x4, x2, x3        ; x4 = 52
+    //   0x10: sw x4, 256(x1)        ; mem[0x80000100] = 52
+    //   0x14: lw x5, 256(x1)        ; x5 = 52
+    //   0x18: bne x5, x2, +8        ; taken (52 != 42), skip to 0x20
+    //   0x1C: addi x6, x0, 99       ; (skipped)
+    //   0x20: addi x6, x0, 1        ; x6 = 1
+    //   0x24: c.li x7, 7            ; x7 = 7
+    //   0x26: c.ebreak              ; halt
+    uint32_t program[] = {
+        0x800000B7,
+        0x02A00113,
+        0x00A00193,
+        0x00310233,
+        0x1040A023,
+        0x1000A283,
+        0x00229463,
+        0x06300313,
+        0x00100313,
+        0x9002439D,
+    };
+    std::memcpy(ram.data(), program, sizeof(program));
 
     sc_core::sc_start();
 
