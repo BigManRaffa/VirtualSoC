@@ -14,6 +14,9 @@
 #include "cpu/decode.h"
 #include "cpu/rv32_defs.h"
 #include "cpu/csr.h"
+#include "cpu/execute.h"
+#include "cpu/rv32m.h"
+#include "cpu/rv32a.h"
 
 static int pass_count = 0;
 static int fail_count = 0;
@@ -440,12 +443,400 @@ struct TestInitiator : public sc_core::sc_module {
         check(val == 0x80012345, "satp write/read");
     }
 
+    void step6_execute() {
+        std::cout << "\nStep 6: Execute + RV32M + RV32A\n";
+        using namespace rv32;
+
+        // --- 6a: RV32M standalone arithmetic ---
+        check(rv32m::mul(6, 7) == 42, "MUL 6*7=42");
+        check(rv32m::mul(0xFFFFFFFF, 2) == 0xFFFFFFFE, "MUL -1*2=-2");
+
+        check(rv32m::mulh(0x80000000, 2) == 0xFFFFFFFF, "MULH -2^31*2 upper");
+        check(rv32m::mulhu(0x80000000, 2) == 1, "MULHU 0x80000000*2 upper=1");
+        check(rv32m::mulhsu(0xFFFFFFFF, 2) == 0xFFFFFFFF, "MULHSU -1*2 upper=-1");
+
+        check(rv32m::div(42, 7) == 6, "DIV 42/7=6");
+        check(rv32m::div(42, 0) == 0xFFFFFFFF, "DIV by zero=-1");
+        check(rv32m::div(0x80000000, 0xFFFFFFFF) == 0x80000000, "DIV overflow=-2^31");
+        check(rv32m::divu(42, 7) == 6, "DIVU 42/7=6");
+        check(rv32m::divu(42, 0) == 0xFFFFFFFF, "DIVU by zero=max");
+
+        check(rv32m::rem(43, 7) == 1, "REM 43%7=1");
+        check(rv32m::rem(43, 0) == 43, "REM by zero=dividend");
+        check(rv32m::rem(0x80000000, 0xFFFFFFFF) == 0, "REM overflow=0");
+        check(rv32m::remu(43, 7) == 1, "REMU 43%7=1");
+        check(rv32m::remu(43, 0) == 43, "REMU by zero=dividend");
+
+        // --- 6b: RV32A standalone AMO helpers ---
+        check(rv32a::amo_swap(10, 20) == 20, "AMO swap");
+        check(rv32a::amo_add(10, 20) == 30, "AMO add");
+        check(rv32a::amo_xor(0xFF, 0x0F) == 0xF0, "AMO xor");
+        check(rv32a::amo_and(0xFF, 0x0F) == 0x0F, "AMO and");
+        check(rv32a::amo_or(0xF0, 0x0F) == 0xFF, "AMO or");
+        check(rv32a::amo_min(5, uint32_t(-3)) == uint32_t(-3), "AMO min signed");
+        check(rv32a::amo_max(5, uint32_t(-3)) == 5, "AMO max signed");
+        check(rv32a::amo_minu(5, uint32_t(-3)) == 5, "AMO minu unsigned");
+        check(rv32a::amo_maxu(5, uint32_t(-3)) == uint32_t(-3), "AMO maxu unsigned");
+
+        // --- 6c: Execute engine ---
+        // Set up a small test memory (4KB)
+        std::vector<uint8_t> tmem(4096, 0);
+        auto mem_read = [&](uint32_t addr, int bytes) -> uint32_t {
+            uint32_t v = 0;
+            for (int i = 0; i < bytes; i++)
+                v |= uint32_t(tmem[addr + i]) << (i * 8);
+            return v;
+        };
+        auto mem_write = [&](uint32_t addr, uint32_t data, int bytes) {
+            for (int i = 0; i < bytes; i++)
+                tmem[addr + i] = (data >> (i * 8)) & 0xFF;
+        };
+
+        auto make_cpu = [&]() -> CPUState {
+            CPUState s;
+            s.mem.read = mem_read;
+            s.mem.write = mem_write;
+            return s;
+        };
+
+        // ALU: ADDI x1, x0, 42
+        {
+            CPUState s = make_cpu();
+            DecodedInstr d = decode(0x02A00093); // addi x1, x0, 42
+            ExecResult r = execute(s, d);
+            check(!r.exception && s.get_reg(1) == 42, "exec ADDI x1=42");
+        }
+
+        // ALU: ADD x3, x1, x2
+        {
+            CPUState s = make_cpu();
+            s.regs[1] = 10;
+            s.regs[2] = 20;
+            DecodedInstr d = decode(0x002081B3); // add x3, x1, x2
+            execute(s, d);
+            check(s.get_reg(3) == 30, "exec ADD 10+20=30");
+        }
+
+        // SUB
+        {
+            CPUState s = make_cpu();
+            s.regs[1] = 50;
+            s.regs[2] = 8;
+            DecodedInstr d = decode(0x402081B3); // sub x3, x1, x2
+            execute(s, d);
+            check(s.get_reg(3) == 42, "exec SUB 50-8=42");
+        }
+
+        // LUI
+        {
+            CPUState s = make_cpu();
+            DecodedInstr d = decode(0x123450B7); // lui x1, 0x12345
+            execute(s, d);
+            check(s.get_regu(1) == 0x12345000, "exec LUI x1=0x12345000");
+        }
+
+        // AUIPC
+        {
+            CPUState s = make_cpu();
+            s.pc = 0x100;
+            DecodedInstr d = decode(0x000010B7 | (OP_AUIPC & 0x7F)); // auipc x1, 1
+            d = decode(0x00001097); // auipc x1, 1
+            execute(s, d);
+            check(s.get_regu(1) == 0x1100, "exec AUIPC pc+0x1000");
+        }
+
+        // SLT / SLTU
+        {
+            CPUState s = make_cpu();
+            s.regs[1] = -5;
+            s.regs[2] = 3;
+            DecodedInstr d;
+
+            d = decode(0x0020A1B3); // slt x3, x1, x2
+            execute(s, d);
+            check(s.get_reg(3) == 1, "exec SLT -5<3=1");
+
+            d = decode(0x0020B1B3); // sltu x3, x1, x2
+            execute(s, d);
+            check(s.get_reg(3) == 0, "exec SLTU 0xFFFFFFFB<3=0");
+        }
+
+        // Shifts
+        {
+            CPUState s = make_cpu();
+            s.regs[1] = 0x80000000;
+            DecodedInstr d;
+
+            d = decode(0x0040D093); // srli x1, x1, 4 -> but need separate rd
+            // Let me use manual: SRLI x2, x1, 4
+            d = decode(0x00405113); // srli x2, x1, 4 (imm=4, rs1=x0... no)
+            // Encode: SRLI x2, x1, 4: opcode=OP_IMM, funct3=5(SRL_SRA), rd=2, rs1=1, imm=4
+            // 000000000100_00001_101_00010_0010011
+            // 0x0040D113
+            d = decode(0x0040D113);
+            execute(s, d);
+            check(s.get_regu(2) == 0x08000000, "exec SRLI >>4");
+
+            // SRAI x3, x1, 4: funct7[5]=1 -> imm=0x404
+            // 010000000100_00001_101_00011_0010011
+            // 0x4040D193
+            d = decode(0x4040D193);
+            execute(s, d);
+            check(s.get_reg(3) == static_cast<int32_t>(0xF8000000u), "exec SRAI >>4 sign-ext");
+        }
+
+        // LW / SW
+        {
+            CPUState s = make_cpu();
+            s.regs[1] = 0x100; // base address
+            // Store 0xDEADBEEF at [0x100]
+            s.regs[2] = static_cast<int32_t>(0xDEADBEEF);
+            DecodedInstr d = decode(0x0020A023); // sw x2, 0(x1)
+            execute(s, d);
+            check(mem_read(0x100, 4) == 0xDEADBEEF, "exec SW stores to mem");
+
+            // Load it back into x3
+            d = decode(0x0000A183); // lw x3, 0(x1)
+            execute(s, d);
+            check(s.get_regu(3) == 0xDEADBEEF, "exec LW loads from mem");
+        }
+
+        // LB / LBU (sign extension)
+        {
+            CPUState s = make_cpu();
+            tmem[0x200] = 0xFF;
+            s.regs[1] = 0x200;
+
+            DecodedInstr d = decode(0x00008183); // lb x3, 0(x1)
+            execute(s, d);
+            check(s.get_reg(3) == -1, "exec LB sign-extends 0xFF=-1");
+
+            d = decode(0x0000C183); // lbu x3, 0(x1)
+            execute(s, d);
+            check(s.get_reg(3) == 255, "exec LBU zero-extends 0xFF=255");
+        }
+
+        // Misaligned load exception
+        {
+            CPUState s = make_cpu();
+            s.regs[1] = 0x101;
+            DecodedInstr d = decode(0x0000A183); // lw x3, 0(x1)
+            ExecResult r = execute(s, d);
+            check(r.exception && r.cause == CAUSE_MISALIGNED_LOAD, "exec LW misaligned exception");
+        }
+
+        // BEQ taken / not taken
+        {
+            CPUState s = make_cpu();
+            s.pc = 0x1000;
+            s.regs[1] = 42;
+            s.regs[2] = 42;
+            DecodedInstr d = decode(0x00208463); // beq x1, x2, +8
+            execute(s, d);
+            check(s.next_pc == 0x1008, "exec BEQ taken");
+
+            s.regs[2] = 99;
+            s.pc = 0x1000;
+            execute(s, d);
+            check(s.next_pc == 0x1004, "exec BEQ not taken");
+        }
+
+        // JAL
+        {
+            CPUState s = make_cpu();
+            s.pc = 0x2000;
+            DecodedInstr d = decode(0x008000EF); // jal x1, +8
+            execute(s, d);
+            check(s.get_regu(1) == 0x2004, "exec JAL link=pc+4");
+            check(s.next_pc == 0x2008, "exec JAL target=pc+8");
+        }
+
+        // JALR
+        {
+            CPUState s = make_cpu();
+            s.pc = 0x3000;
+            s.regs[5] = 0x4000;
+            DecodedInstr d = decode(0x000280E7); // jalr x1, 0(x5)
+            execute(s, d);
+            check(s.get_regu(1) == 0x3004, "exec JALR link=pc+4");
+            check(s.next_pc == 0x4000, "exec JALR target=x5");
+        }
+
+        // x0 is always zero
+        {
+            CPUState s = make_cpu();
+            DecodedInstr d = decode(0x02A00013); // addi x0, x0, 42
+            execute(s, d);
+            check(s.get_reg(0) == 0, "exec write to x0 ignored");
+        }
+
+        // MUL via execute
+        {
+            CPUState s = make_cpu();
+            s.regs[1] = 6;
+            s.regs[2] = 7;
+            DecodedInstr d = decode(0x022080B3); // mul x1, x1, x2
+            execute(s, d);
+            check(s.get_reg(1) == 42, "exec MUL 6*7=42");
+        }
+
+        // DIV via execute (div by zero)
+        {
+            CPUState s = make_cpu();
+            s.regs[1] = 42;
+            s.regs[2] = 0;
+            DecodedInstr d = decode(0x0220C1B3); // div x3, x1, x2
+            execute(s, d);
+            check(s.get_regu(3) == 0xFFFFFFFF, "exec DIV by zero=-1");
+        }
+
+        // LR.W / SC.W success
+        {
+            CPUState s = make_cpu();
+            mem_write(0x300, 0xAAAAAAAA, 4);
+            s.regs[1] = 0x300;
+            s.regs[2] = 0xBBBBBBBB;
+
+            DecodedInstr d_lr = decode(0x1000A52F); // lr.w x10, (x1)
+            execute(s, d_lr);
+            check(s.get_regu(10) == 0xAAAAAAAA, "exec LR.W loads value");
+            check(s.lr_sc.valid, "exec LR.W sets reservation");
+
+            DecodedInstr d_sc = decode(0x1820A5AF); // sc.w x11, x2, (x1)
+            execute(s, d_sc);
+            check(s.get_reg(11) == 0, "exec SC.W success=0");
+            check(mem_read(0x300, 4) == 0xBBBBBBBB, "exec SC.W wrote value");
+        }
+
+        // SC.W failure (no reservation)
+        {
+            CPUState s = make_cpu();
+            s.regs[1] = 0x300;
+            s.regs[2] = 0xCCCCCCCC;
+            mem_write(0x300, 0x11111111, 4);
+
+            DecodedInstr d_sc = decode(0x1820A5AF); // sc.w x11, x2, (x1)
+            execute(s, d_sc);
+            check(s.get_reg(11) == 1, "exec SC.W failure=1");
+            check(mem_read(0x300, 4) == 0x11111111, "exec SC.W didn't write");
+        }
+
+        // AMOSWAP.W
+        {
+            CPUState s = make_cpu();
+            mem_write(0x400, 100, 4);
+            s.regs[1] = 0x400;
+            s.regs[2] = 200;
+            DecodedInstr d = decode(0x0820A52F); // amoswap.w x10, x2, (x1)
+            execute(s, d);
+            check(s.get_reg(10) == 100, "exec AMOSWAP old=100");
+            check(mem_read(0x400, 4) == 200, "exec AMOSWAP new=200");
+        }
+
+        // AMOADD.W
+        {
+            CPUState s = make_cpu();
+            mem_write(0x400, 30, 4);
+            s.regs[1] = 0x400;
+            s.regs[2] = 12;
+            DecodedInstr d = decode(0x0020A52F); // amoadd.w x10, x2, (x1)
+            execute(s, d);
+            check(s.get_reg(10) == 30, "exec AMOADD old=30");
+            check(mem_read(0x400, 4) == 42, "exec AMOADD new=42");
+        }
+
+        // CSR via execute: CSRRW
+        {
+            CPUState s = make_cpu();
+            s.regs[1] = 0x80000100;
+            // csrrw x2, mtvec, x1 -> CSR=0x305, rd=2, rs1=1
+            // funct3=001(CSRRW), csr=0x305
+            // 0011_0000_0101_00001_001_00010_1110011
+            // 0x30509173
+            DecodedInstr d = decode(0x30509173);
+            execute(s, d);
+            uint32_t val;
+            s.csr.read(CSR_MTVEC, PRV_M, val);
+            check(val == 0x80000100, "exec CSRRW writes mtvec");
+        }
+
+        // CSRRS read mscratch
+        {
+            CPUState s = make_cpu();
+            s.csr.write(CSR_MSCRATCH, PRV_M, 0xDEADBEEF);
+            // csrrs x1, mscratch, x0 -> read-only (rs1=x0, no write)
+            // 0011_0100_0000_00000_010_00001_1110011
+            // 0x340020F3
+            DecodedInstr d = decode(0x340020F3);
+            execute(s, d);
+            check(s.get_regu(1) == 0xDEADBEEF, "exec CSRRS reads mscratch");
+        }
+
+        // ECALL from M-mode
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_M;
+            DecodedInstr d = decode(0x00000073);
+            ExecResult r = execute(s, d);
+            check(r.exception && r.cause == CAUSE_ECALL_M, "exec ECALL M-mode");
+        }
+
+        // ECALL from U-mode
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_U;
+            DecodedInstr d = decode(0x00000073);
+            ExecResult r = execute(s, d);
+            check(r.exception && r.cause == CAUSE_ECALL_U, "exec ECALL U-mode");
+        }
+
+        // EBREAK
+        {
+            CPUState s = make_cpu();
+            s.pc = 0x5000;
+            DecodedInstr d = decode(0x00100073);
+            ExecResult r = execute(s, d);
+            check(r.exception && r.cause == CAUSE_BREAKPOINT, "exec EBREAK");
+        }
+
+        // MRET
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_M;
+            s.csr.mepc = 0x80000000;
+            s.csr.mstatus = MSTATUS_MPIE | (PRV_S << MSTATUS_MPP_SHIFT);
+            DecodedInstr d = decode(0x30200073);
+            ExecResult r = execute(s, d);
+            check(!r.exception, "exec MRET no exception");
+            check(s.next_pc == 0x80000000, "exec MRET pc=mepc");
+            check(s.priv == PRV_S, "exec MRET priv=S (from MPP)");
+            check((s.csr.mstatus & MSTATUS_MIE) != 0, "exec MRET restores MIE from MPIE");
+        }
+
+        // ILLEGAL
+        {
+            CPUState s = make_cpu();
+            DecodedInstr d = decode(0x00000000);
+            ExecResult r = execute(s, d);
+            check(r.exception && r.cause == CAUSE_ILLEGAL_INSTR, "exec ILLEGAL exception");
+        }
+
+        // FENCE (no-op, shouldn't crash)
+        {
+            CPUState s = make_cpu();
+            DecodedInstr d = decode(0x0FF0000F);
+            ExecResult r = execute(s, d);
+            check(!r.exception, "exec FENCE no-op");
+        }
+    }
+
     void run_tests() {
         step1_memory();
         step2_bus();
         step3_rv32_defs();
         step4_decoder();
         step5_csr();
+        step6_execute();
         sc_core::sc_stop();
     }
 };

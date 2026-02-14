@@ -72,6 +72,11 @@ set(VP_SOURCES
     # Step 5: CSR file
     src/cpu/csr.cpp
 
+    # Step 6: Execute + M extension + A extension
+    src/cpu/execute.cpp
+    src/cpu/rv32m.cpp
+    src/cpu/rv32a.cpp
+
     # Entry point
     src/main.cpp
 )
