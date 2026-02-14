@@ -17,6 +17,7 @@
 #include "cpu/execute.h"
 #include "cpu/rv32m.h"
 #include "cpu/rv32a.h"
+#include "cpu/trap.h"
 
 static int pass_count = 0;
 static int fail_count = 0;
@@ -1075,6 +1076,236 @@ struct TestInitiator : public sc_core::sc_module {
         }
     }
 
+    void step7_trap() {
+        std::cout << "\nStep 7: Trap Handler\n";
+        using namespace rv32;
+
+        std::vector<uint8_t> tmem(4096, 0);
+        auto mem_read = [&](uint32_t addr, int bytes) -> uint32_t {
+            uint32_t v = 0;
+            for (int i = 0; i < bytes; i++)
+                v |= uint32_t(tmem[addr + i]) << (i * 8);
+            return v;
+        };
+        auto mem_write = [&](uint32_t addr, uint32_t data, int bytes) {
+            for (int i = 0; i < bytes; i++)
+                tmem[addr + i] = (data >> (i * 8)) & 0xFF;
+        };
+        auto make_cpu = [&]() -> CPUState {
+            CPUState s;
+            s.mem.read = mem_read;
+            s.mem.write = mem_write;
+            return s;
+        };
+
+        // take_trap: ECALL from U-mode -> M-mode (no delegation)
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_U;
+            s.pc = 0x80001000;
+            s.csr.mtvec = 0x80000100;
+            s.csr.mstatus = MSTATUS_MIE;
+            trap::take_trap(s, CAUSE_ECALL_U, 0);
+            check(s.csr.mepc == 0x80001000, "trap mepc = faulting pc");
+            check(s.csr.mcause == CAUSE_ECALL_U, "trap mcause = ECALL_U");
+            check(s.csr.mtval == 0, "trap mtval = 0");
+            check(s.priv == PRV_M, "trap escalates to M-mode");
+            check(s.next_pc == 0x80000100, "trap jumps to mtvec");
+            check((s.csr.mstatus & MSTATUS_MIE) == 0, "trap clears MIE");
+            check((s.csr.mstatus & MSTATUS_MPIE) != 0, "trap saves MIE to MPIE");
+            check(((s.csr.mstatus >> MSTATUS_MPP_SHIFT) & 0x3) == PRV_U, "trap MPP = U");
+        }
+
+        // take_trap: exception from S-mode -> M-mode
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_S;
+            s.pc = 0x80002000;
+            s.csr.mtvec = 0x80000200;
+            s.csr.mstatus = MSTATUS_MIE | MSTATUS_SIE;
+            trap::take_trap(s, CAUSE_ILLEGAL_INSTR, 0xDEADBEEF);
+            check(s.priv == PRV_M, "trap S->M on non-delegated exception");
+            check(s.csr.mepc == 0x80002000, "trap mepc from S-mode");
+            check(s.csr.mtval == 0xDEADBEEF, "trap mtval = bad instr");
+            check(((s.csr.mstatus >> MSTATUS_MPP_SHIFT) & 0x3) == PRV_S, "trap MPP = S");
+        }
+
+        // take_trap: delegation to S-mode via medeleg
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_U;
+            s.pc = 0x80003000;
+            s.csr.mtvec = 0x80000100;
+            s.csr.stvec = 0x80000400;
+            s.csr.medeleg = (1u << CAUSE_ECALL_U);
+            s.csr.mstatus = MSTATUS_SIE;
+            trap::take_trap(s, CAUSE_ECALL_U, 0);
+            check(s.priv == PRV_S, "delegated trap goes to S-mode");
+            check(s.csr.sepc == 0x80003000, "delegated trap sepc");
+            check(s.csr.scause == CAUSE_ECALL_U, "delegated trap scause");
+            check(s.next_pc == 0x80000400, "delegated trap jumps to stvec");
+            check((s.csr.mstatus & MSTATUS_SIE) == 0, "delegated trap clears SIE");
+            check((s.csr.mstatus & MSTATUS_SPIE) != 0, "delegated trap saves SIE to SPIE");
+            check((s.csr.mstatus & MSTATUS_SPP) == 0, "delegated trap SPP = U");
+        }
+
+        // take_trap: delegation from S-mode sets SPP = S
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_S;
+            s.pc = 0x80004000;
+            s.csr.stvec = 0x80000500;
+            s.csr.medeleg = (1u << CAUSE_LOAD_PAGE_FAULT);
+            s.csr.mstatus = MSTATUS_SIE;
+            trap::take_trap(s, CAUSE_LOAD_PAGE_FAULT, 0x1234);
+            check(s.priv == PRV_S, "S-mode delegated stays S-mode");
+            check((s.csr.mstatus & MSTATUS_SPP) != 0, "SPP = S when trap from S");
+            check(s.csr.stval == 0x1234, "stval = faulting addr");
+        }
+
+        // take_trap: M-mode trap never delegates (priv > S)
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_M;
+            s.pc = 0x80005000;
+            s.csr.mtvec = 0x80000100;
+            s.csr.stvec = 0x80000400;
+            s.csr.medeleg = (1u << CAUSE_BREAKPOINT);
+            trap::take_trap(s, CAUSE_BREAKPOINT, s.pc);
+            check(s.priv == PRV_M, "M-mode trap never delegates");
+            check(s.next_pc == 0x80000100, "M-mode trap uses mtvec");
+        }
+
+        // Vectored mtvec: interrupt jumps to base + 4*cause
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_U;
+            s.pc = 0x80006000;
+            s.csr.mtvec = 0x80000100 | 1; // mode=1 (vectored)
+            trap::take_trap(s, IRQ_M_TIMER, 0);
+            uint32_t expected = 0x80000100 + 4 * 7; // cause_code=7
+            check(s.next_pc == expected, "vectored mtvec for timer IRQ");
+            check(s.csr.mcause == IRQ_M_TIMER, "mcause has interrupt bit");
+        }
+
+        // Vectored mtvec: exceptions always use base (not vectored)
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_U;
+            s.pc = 0x80007000;
+            s.csr.mtvec = 0x80000100 | 1;
+            trap::take_trap(s, CAUSE_ECALL_U, 0);
+            check(s.next_pc == 0x80000100, "vectored mtvec uses base for exceptions");
+        }
+
+        // check_pending_interrupts: timer interrupt pending + enabled
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_M;
+            s.csr.mstatus = MSTATUS_MIE;
+            s.csr.mie = MIP_MTIP;
+            s.csr.set_mip_mtip(true);
+            uint32_t irq = trap::check_pending_interrupts(s);
+            check(irq == IRQ_M_TIMER, "pending timer IRQ detected");
+        }
+
+        // check_pending_interrupts: MIE disabled in M-mode -> no interrupt
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_M;
+            s.csr.mstatus = 0; // MIE = 0
+            s.csr.mie = MIP_MTIP;
+            s.csr.set_mip_mtip(true);
+            uint32_t irq = trap::check_pending_interrupts(s);
+            check(irq == 0, "no IRQ when MIE disabled in M-mode");
+        }
+
+        // check_pending_interrupts: M-mode IRQ taken from U-mode even with MIE=0
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_U;
+            s.csr.mstatus = 0;
+            s.csr.mie = MIP_MTIP;
+            s.csr.set_mip_mtip(true);
+            uint32_t irq = trap::check_pending_interrupts(s);
+            check(irq == IRQ_M_TIMER, "M-mode IRQ taken from U-mode regardless of MIE");
+        }
+
+        // check_pending_interrupts: mie register masks specific interrupt
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_M;
+            s.csr.mstatus = MSTATUS_MIE;
+            s.csr.mie = 0; // no interrupts enabled in mie
+            s.csr.set_mip_mtip(true);
+            uint32_t irq = trap::check_pending_interrupts(s);
+            check(irq == 0, "no IRQ when mie bit not set");
+        }
+
+        // check_pending_interrupts: priority MEI > MTI
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_M;
+            s.csr.mstatus = MSTATUS_MIE;
+            s.csr.mie = MIP_MTIP | MIP_MEIP;
+            s.csr.set_mip_mtip(true);
+            s.csr.set_mip_meip(true);
+            uint32_t irq = trap::check_pending_interrupts(s);
+            check(irq == IRQ_M_EXTERNAL, "MEI has priority over MTI");
+        }
+
+        // check_pending_interrupts: delegated S-mode interrupt in S-mode
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_S;
+            s.csr.mstatus = MSTATUS_SIE;
+            s.csr.mie = MIP_STIP;
+            s.csr.mideleg = MIP_STIP;
+            s.csr.set_mip_stip(true);
+            uint32_t irq = trap::check_pending_interrupts(s);
+            check(irq == IRQ_S_TIMER, "delegated S-timer IRQ in S-mode");
+        }
+
+        // check_pending_interrupts: delegated S-mode interrupt NOT taken in M-mode
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_M;
+            s.csr.mstatus = MSTATUS_MIE | MSTATUS_SIE;
+            s.csr.mie = MIP_STIP;
+            s.csr.mideleg = MIP_STIP;
+            s.csr.set_mip_stip(true);
+            uint32_t irq = trap::check_pending_interrupts(s);
+            check(irq == 0, "delegated S-IRQ not taken in M-mode");
+        }
+
+        // check_pending_interrupts: SIE disabled in S-mode blocks S interrupt
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_S;
+            s.csr.mstatus = 0; // SIE = 0
+            s.csr.mie = MIP_SEIP;
+            s.csr.mideleg = MIP_SEIP;
+            s.csr.set_mip_seip(true);
+            uint32_t irq = trap::check_pending_interrupts(s);
+            check(irq == 0, "S-IRQ blocked when SIE=0 in S-mode");
+        }
+
+        // Full round-trip: execute returns exception, take_trap handles it
+        {
+            CPUState s = make_cpu();
+            s.priv = PRV_U;
+            s.pc = 0x80010000;
+            s.csr.mtvec = 0x80000100;
+            DecodedInstr d = decode(0x00000073); // ecall
+            ExecResult r = execute(s, d);
+            check(r.exception, "ecall returns exception");
+            trap::take_trap(s, r.cause, r.tval);
+            check(s.priv == PRV_M, "round-trip: ecall -> M-mode trap");
+            check(s.next_pc == 0x80000100, "round-trip: pc = mtvec");
+            check(s.csr.mepc == 0x80010000, "round-trip: mepc = ecall pc");
+        }
+    }
+
     void run_tests() {
         step1_memory();
         step2_bus();
@@ -1082,6 +1313,7 @@ struct TestInitiator : public sc_core::sc_module {
         step4_decoder();
         step5_csr();
         step6_execute();
+        step7_trap();
         sc_core::sc_stop();
     }
 };

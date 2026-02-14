@@ -4,55 +4,103 @@
 #include <cstdint>
 
 // Instruction types for execute dispatch
-enum class InstrType {
-    // RV32I - Upper Immediate / Jump
-    LUI,   AUIPC, JAL,   JALR,
+enum class InstrType
+{
+    // Upper Immediate / Jump
+    LUI,
+    AUIPC,
+    JAL,
+    JALR,
 
-    // RV32I - Branch
-    BEQ,   BNE,   BLT,   BGE,   BLTU,  BGEU,
+    // Branch
+    BEQ,
+    BNE,
+    BLT,
+    BGE,
+    BLTU,
+    BGEU,
 
-    // RV32I - Load
-    LB,    LH,    LW,    LBU,   LHU,
+    // Load
+    LB,
+    LH,
+    LW,
+    LBU,
+    LHU,
 
-    // RV32I - Store
-    SB,    SH,    SW,
+    // Store
+    SB,
+    SH,
+    SW,
 
-    // RV32I - Immediate ALU
-    ADDI,  SLTI,  SLTIU, XORI,  ORI,   ANDI,  SLLI,  SRLI,  SRAI,
+    // Immediate ALU
+    ADDI,
+    SLTI,
+    SLTIU,
+    XORI,
+    ORI,
+    ANDI,
+    SLLI,
+    SRLI,
+    SRAI,
 
-    // RV32I - Register ALU
-    ADD,   SUB,   SLL,   SLT,   SLTU,  XOR,   SRL,   SRA,   OR,    AND,
+    // Register ALU
+    ADD,
+    SUB,
+    SLL,
+    SLT,
+    SLTU,
+    XOR,
+    SRL,
+    SRA,
+    OR,
+    AND,
 
-    // M Extension - Multiply / Divide
-    MUL,   MULH,  MULHSU, MULHU, DIV,  DIVU,  REM,   REMU,
+    // Multiply / Divide
+    MUL,
+    MULH,
+    MULHSU,
+    MULHU,
+    DIV,
+    DIVU,
+    REM,
+    REMU,
 
-    // A Extension - Atomics
-    LR_W,      SC_W,
-    AMOSWAP_W, AMOADD_W,  AMOXOR_W,  AMOAND_W,
-    AMOOR_W,   AMOMIN_W,  AMOMAX_W,  AMOMINU_W, AMOMAXU_W,
+    // A Extension, Atomics
+    LR_W,
+    SC_W,
+    AMOSWAP_W,
+    AMOADD_W,
+    AMOXOR_W,
+    AMOAND_W,
+    AMOOR_W,
+    AMOMIN_W,
+    AMOMAX_W,
+    AMOMINU_W,
+    AMOMAXU_W,
 
-    // System - Trap
-    ECALL, EBREAK, MRET,  SRET,  URET,  WFI,   SFENCE_VMA,
+    // System, Trap
+    ECALL, EBREAK, MRET, SRET, URET, WFI, SFENCE_VMA,
 
-    // System - CSR
-    CSRRW, CSRRS, CSRRC, CSRRWI, CSRRSI, CSRRCI,
+    // System, CSR
+    CSRRW, CSRRS, CSRRC, CSRRWI, CSRRSI, SRRCI,
 
-    // System - Fence
+    // System, Fence
     FENCE, FENCEI,
 
     // Invalid
     ILLEGAL
 };
 
-struct DecodedInstr {
-    InstrType type       = InstrType::ILLEGAL;
-    uint32_t  rd         = 0;
-    uint32_t  rs1        = 0;
-    uint32_t  rs2        = 0;
-    int32_t   imm        = 0;
-    uint32_t  csr        = 0;      // CSR address for CSR instructions
-    uint32_t  raw        = 0;      // Original instruction word
-    bool      compressed = false;  // True if was 16-bit RVC
+struct DecodedInstr
+{
+    InstrType type = InstrType::ILLEGAL;
+    uint32_t rd = 0;
+    uint32_t rs1 = 0;
+    uint32_t rs2 = 0;
+    int32_t imm = 0;
+    uint32_t csr = 0;        // CSR address for CSR instructions
+    uint32_t raw = 0;        // Original instruction word
+    bool compressed = false; // True if was 16-bit RVC
 
     uint32_t instr_len() const { return compressed ? 2 : 4; }
 };

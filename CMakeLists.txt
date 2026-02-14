@@ -77,6 +77,9 @@ set(VP_SOURCES
     src/cpu/rv32m.cpp
     src/cpu/rv32a.cpp
 
+    # Step 7: Trap handler
+    src/cpu/trap.cpp
+
     # Entry point
     src/main.cpp
 )
