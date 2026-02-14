@@ -236,9 +236,9 @@ uint32_t expand_compressed(uint16_t ci) {
     case 0b00: // Quadrant 0
         switch (f3) {
         case 0b000: { // C.ADDI4SPN -> addi rd', x2, nzuimm
-            uint32_t nzuimm = ((ci >> 1) & 0x40) | ((ci >> 7) & 0x30) |
-                              ((ci >> 2) & 0x8)  | ((ci >> 4) & 0x4);
-            nzuimm <<= 2;
+            // nzuimm[5:4|9:6|2|3] from ci[12:7|6|5]
+            uint32_t nzuimm = ((ci >> 1) & 0x3C0) | ((ci >> 7) & 0x30) |
+                              ((ci >> 2) & 0x8)   | ((ci >> 4) & 0x4);
             if (nzuimm == 0) return 0;
             uint32_t rdp = creg((ci >> 2) & 0x7);
             return (nzuimm << 20) | (2 << 15) | (0b000 << 12) | (rdp << 7) | OP_IMM;

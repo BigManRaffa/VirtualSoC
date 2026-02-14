@@ -346,6 +346,251 @@ struct TestInitiator : public sc_core::sc_module {
             check(d.type == InstrType::LW && d.rd == 10 && d.rs1 == 2, "C.LWSP x10,0(sp)");
             check(d.compressed, "C.LWSP compressed");
         }
+
+        // C.ADDI4SPN: addi rd', x2, nzuimm  (nzuimm is scaled *4, range [4,1020])
+        // Encoding: funct3=000, nzuimm[5:4|9:6|2|3] in ci[12:5], rd' in ci[4:2], op=00
+        {
+            // nzuimm=8: bits [3]=1 -> ci[5]=1 => ci = 000_00001_000_00_00 = 0x0020
+            // rd' = 0 -> x8, ci[4:2]=000
+            uint16_t ci = 0x0020;
+            DecodedInstr d = decode(ci);
+            check(d.type == InstrType::ADDI && d.rd == 8 && d.rs1 == 2 && d.imm == 8,
+                  "C.ADDI4SPN nzuimm=8");
+        }
+        {
+            // nzuimm=1020 (max): bits 9:2 = 11111111_00
+            // nzuimm[5:4]=ci[12:11], nzuimm[9:6]=ci[10:7], nzuimm[2]=ci[6], nzuimm[3]=ci[5]
+            // nzuimm = 0x3FC = 0b1111111100
+            // [9:6]=1111 -> ci[10:7]=1111, [5:4]=11 -> ci[12:11]=11, [3]=1 -> ci[5]=1, [2]=1 -> ci[6]=1
+            // ci = 1_11_1111_11_100_00 = bits: f3=000, ci[12]=1,ci[11]=1,ci[10:7]=1111,ci[6]=1,ci[5]=1
+            // ci[12:5] = 11111111 -> ci = 000_11111111_000_00 = 0x1FE0
+            // rd' = 0 -> x8
+            uint16_t ci = 0x1FE0;
+            DecodedInstr d = decode(ci);
+            check(d.type == InstrType::ADDI && d.rd == 8 && d.imm == 1020,
+                  "C.ADDI4SPN nzuimm=1020 (max)");
+        }
+        {
+            // nzuimm=256: bit[8]=1 -> ci[9]=1 (nzuimm[9:6] in ci[10:7])
+            // nzuimm = 0x100 = 0b0100000000 -> [9:6]=0100 -> ci[10:7]=0100
+            // ci[12:11]=00(nzuimm[5:4]), ci[10:7]=0100, ci[6]=0(nzuimm[2]), ci[5]=0(nzuimm[3])
+            // ci = 000_00_0100_00_000_00 = 0x0200
+            uint16_t ci = 0x0200;
+            DecodedInstr d = decode(ci);
+            check(d.type == InstrType::ADDI && d.imm == 256,
+                  "C.ADDI4SPN nzuimm=256 (tests upper bits)");
+        }
+
+        // C.LW: lw rd', offset(rs1')
+        {
+            // offset=0, rs1'=x8, rd'=x8
+            // funct3=010, ci[12:10]=000(off[5:3]), ci[9:7]=000(rs1'-8), ci[6]=0(off[2]),
+            // ci[5]=0(off[6]), ci[4:2]=000(rd'-8), op=00
+            // ci = 010_000_000_00_000_00 = 0x4000
+            DecodedInstr d = decode(0x4000);
+            check(d.type == InstrType::LW && d.rd == 8 && d.rs1 == 8 && d.imm == 0,
+                  "C.LW x8,0(x8)");
+        }
+        {
+            // offset=124: bits [5:3]=111, [2]=1, [6]=1
+            // ci[12:10]=111, ci[6]=1, ci[5]=1 => ci = 010_111_000_11_000_00 = 0x5C60
+            // rs1'=x8(000), rd'=x8(000)
+            DecodedInstr d = decode(0x5C60);
+            check(d.type == InstrType::LW && d.imm == 124, "C.LW offset=124");
+        }
+
+        // C.SW: sw rs2', offset(rs1')
+        {
+            // offset=0, rs1'=x8, rs2'=x9
+            // funct3=110, ci[12:10]=000, ci[9:7]=000(rs1'-8), ci[6:5]=00, ci[4:2]=001(rs2'-8)
+            // ci = 110_000_000_00_001_00 = 0xC004
+            DecodedInstr d = decode(0xC004);
+            check(d.type == InstrType::SW && d.rs1 == 8 && d.rs2 == 9, "C.SW x9,0(x8)");
+        }
+
+        // C.ADDI: addi rd, rd, nzimm
+        {
+            // x1 += -1: rd=x1, nzimm=-1 -> ci[12]=1(sign), ci[6:2]=11111
+            // funct3=000, ci[11:7]=00001(rd), op=01
+            // ci = 000_1_00001_11111_01 = 0x10FD
+            DecodedInstr d = decode(0x10FD);
+            check(d.type == InstrType::ADDI && d.rd == 1 && d.rs1 == 1 && d.imm == -1,
+                  "C.ADDI x1,-1");
+        }
+
+        // C.JAL: jal x1, offset (RV32 only)
+        {
+            // offset=+2: ci[3]=1 (offset bit 1... this is complex)
+            // Use known good encoding: C.JAL with offset=0 -> all offset bits zero
+            // funct3=001, all offset bits=0 -> ci = 001_0_0000_0000_0_01 = 0x2001
+            // But offset=0 for JAL is unusual. Let's just verify it decodes as JAL with link=x1
+            DecodedInstr d = decode(0x2001);
+            check(d.type == InstrType::JAL && d.rd == 1, "C.JAL decodes to JAL x1");
+            check(d.compressed, "C.JAL compressed");
+        }
+
+        // C.J: jal x0, offset
+        {
+            // offset=0 -> all bits zero
+            // funct3=101, op=01 -> ci = 101_0_0000_0000_0_01 = 0xA001
+            DecodedInstr d = decode(0xA001);
+            check(d.type == InstrType::JAL && d.rd == 0, "C.J decodes to JAL x0");
+            check(d.compressed, "C.J compressed");
+        }
+
+        // C.BEQZ: beq rs1', x0, offset
+        {
+            // offset=0, rs1'=x8
+            // funct3=110, ci[12:10]=000, ci[9:7]=000(rs1'-8), ci[6:2]=00000, op=01
+            // ci = 110_000_000_00000_01 = 0xC001
+            DecodedInstr d = decode(0xC001);
+            check(d.type == InstrType::BEQ && d.rs1 == 8 && d.rs2 == 0, "C.BEQZ x8");
+            check(d.compressed, "C.BEQZ compressed");
+        }
+
+        // C.BNEZ: bne rs1', x0, offset
+        {
+            // offset=0, rs1'=x9 -> ci[9:7]=001
+            // funct3=111, ci[12:10]=000, ci[9:7]=001, ci[6:2]=00000, op=01
+            // ci = 111_000_001_00000_01 = 0xE081
+            DecodedInstr d = decode(0xE081);
+            check(d.type == InstrType::BNE && d.rs1 == 9 && d.rs2 == 0, "C.BNEZ x9");
+            check(d.compressed, "C.BNEZ compressed");
+        }
+
+        // C.SRLI: srli rd', rd', shamt
+        {
+            // shamt=4, rd'=x8 -> ci[9:7]=000
+            // funct3=100, ci[11:10]=00(SRLI), ci[12]=0, ci[6:2]=00100(shamt)
+            // ci = 100_0_00_000_00100_01 = 0x8011
+            DecodedInstr d = decode(0x8011);
+            check(d.type == InstrType::SRLI && d.rd == 8 && d.rs1 == 8 && d.imm == 4,
+                  "C.SRLI x8,4");
+        }
+
+        // C.SRAI: srai rd', rd', shamt
+        {
+            // shamt=4, rd'=x8
+            // funct3=100, ci[11:10]=01(SRAI), ci[12]=0, ci[6:2]=00100
+            // ci = 100_0_01_000_00100_01 = 0x8411
+            DecodedInstr d = decode(0x8411);
+            check(d.type == InstrType::SRAI && d.rd == 8 && d.rs1 == 8 && d.imm == 4,
+                  "C.SRAI x8,4");
+        }
+
+        // C.ANDI: andi rd', rd', imm
+        {
+            // imm=0xF, rd'=x8
+            // funct3=100, ci[11:10]=10(ANDI), ci[12]=0(sign), ci[6:2]=01111
+            // ci = 100_0_10_000_01111_01 = 0x883D
+            DecodedInstr d = decode(0x883D);
+            check(d.type == InstrType::ANDI && d.rd == 8 && d.imm == 0xF, "C.ANDI x8,0xF");
+        }
+
+        // C.SUB: sub rd', rd', rs2'
+        {
+            // rd'=x8(000), rs2'=x9(001)
+            // funct3=100, ci[12]=0, ci[11:10]=11, ci[6:5]=00(SUB), ci[4:2]=001(rs2'-8)
+            // ci = 100_0_11_000_00_001_01 = 0x8C05
+            DecodedInstr d = decode(0x8C05);
+            check(d.type == InstrType::SUB && d.rd == 8 && d.rs1 == 8 && d.rs2 == 9,
+                  "C.SUB x8,x9");
+        }
+
+        // C.XOR: xor rd', rd', rs2'
+        {
+            // rd'=x8(000), rs2'=x9(001), ci[6:5]=01(XOR)
+            // ci = 100_0_11_000_01_001_01 = 0x8C25
+            DecodedInstr d = decode(0x8C25);
+            check(d.type == InstrType::XOR && d.rd == 8 && d.rs2 == 9, "C.XOR x8,x9");
+        }
+
+        // C.OR: or rd', rd', rs2'
+        {
+            // ci[6:5]=10(OR)
+            // ci = 100_0_11_000_10_001_01 = 0x8C45
+            DecodedInstr d = decode(0x8C45);
+            check(d.type == InstrType::OR && d.rd == 8 && d.rs2 == 9, "C.OR x8,x9");
+        }
+
+        // C.AND: and rd', rd', rs2'
+        {
+            // ci[6:5]=11(AND)
+            // ci = 100_0_11_000_11_001_01 = 0x8C65
+            DecodedInstr d = decode(0x8C65);
+            check(d.type == InstrType::AND && d.rd == 8 && d.rs2 == 9, "C.AND x8,x9");
+        }
+
+        // C.SLLI: slli rd, rd, shamt
+        {
+            // rd=x1, shamt=4
+            // funct3=000, ci[12]=0, ci[11:7]=00001(rd), ci[6:2]=00100(shamt), op=10
+            // ci = 000_0_00001_00100_10 = 0x0092
+            DecodedInstr d = decode(0x0092);
+            check(d.type == InstrType::SLLI && d.rd == 1 && d.rs1 == 1 && d.imm == 4,
+                  "C.SLLI x1,4");
+        }
+
+        // C.JR: jalr x0, rs1, 0
+        {
+            // rs1=x1, ci[12]=0, ci[11:7]=00001, ci[6:2]=00000, op=10
+            // ci = 100_0_00001_00000_10 = 0x8082
+            DecodedInstr d = decode(0x8082);
+            check(d.type == InstrType::JALR && d.rd == 0 && d.rs1 == 1, "C.JR x1 (ret)");
+            check(d.compressed, "C.JR compressed");
+        }
+
+        // C.JALR: jalr x1, rs1, 0
+        {
+            // rs1=x5, ci[12]=1, ci[11:7]=00101, ci[6:2]=00000, op=10
+            // ci = 100_1_00101_00000_10 = 0x9282
+            DecodedInstr d = decode(0x9282);
+            check(d.type == InstrType::JALR && d.rd == 1 && d.rs1 == 5, "C.JALR x5");
+        }
+
+        // C.SWSP: sw rs2, offset(x2)
+        {
+            // rs2=x1, offset=0
+            // funct3=110, ci[12:7]=000000(offset), ci[6:2]=00001(rs2), op=10
+            // ci = 110_000000_00001_10 = 0xC006
+            DecodedInstr d = decode(0xC006);
+            check(d.type == InstrType::SW && d.rs1 == 2 && d.rs2 == 1, "C.SWSP x1,0(sp)");
+            check(d.compressed, "C.SWSP compressed");
+        }
+
+        // C.ADDI16SP: addi x2, x2, nzimm (nzimm is multiple of 16)
+        {
+            // nzimm=16: nzimm[4]=1 -> ci[6]=1... let me use known encoding
+            // nzimm=32: 0b0000_00_1_00000 -> nzimm[5]=1 -> ci[2] shifts...
+            // Actually let me just test via decode+execute roundtrip
+            // nzimm=+16: bit layout: nzimm[9]=ci[12], nzimm[4]=ci[6], nzimm[6]=ci[5],
+            //   nzimm[8:7]=ci[4:3], nzimm[5]=ci[2]
+            // nzimm=16=0x10: bit[4]=1 -> ci[6]=1
+            // funct3=011, ci[12]=0(sign), ci[11:7]=00010(rd=x2), ci[6]=1, ci[5:2]=0000, op=01
+            // ci = 011_0_00010_1_0000_01 = 0x6141
+            DecodedInstr d = decode(0x6141);
+            check(d.type == InstrType::ADDI && d.rd == 2 && d.rs1 == 2 && d.imm == 16,
+                  "C.ADDI16SP nzimm=16");
+        }
+
+        // C.LUI: lui rd, nzimm
+        {
+            // rd=x1, nzimm=1 (upper immediate = 0x1000)
+            // funct3=011, ci[12]=0(sign), ci[11:7]=00001(rd), ci[6:2]=00001(nzimm[16:12])
+            // ci = 011_0_00001_00001_01 = 0x6085
+            DecodedInstr d = decode(0x6085);
+            check(d.type == InstrType::LUI && d.rd == 1, "C.LUI x1");
+            check(d.compressed, "C.LUI compressed");
+        }
+
+        // C.ADD: add rd, rd, rs2
+        {
+            // rd=x1, rs2=x2 -> ci[12]=1, ci[11:7]=00001, ci[6:2]=00010, op=10
+            // ci = 1001_0000_1000_1010 = 0x908A
+            DecodedInstr d = decode(0x908A);
+            check(d.type == InstrType::ADD && d.rd == 1 && d.rs1 == 1 && d.rs2 == 2,
+                  "C.ADD x1,x2");
+        }
     }
 
     void step5_csr() {

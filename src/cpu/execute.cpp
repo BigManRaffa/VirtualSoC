@@ -210,7 +210,7 @@ ExecResult execute(CPUState& s, const DecodedInstr& d) {
     }
     case InstrType::CSRRWI: {
         uint32_t old_val;
-        uint32_t zimm = d.rs1;
+        uint32_t zimm = d.rs1; // rs1 field IS the 5-bit zero-extended immediate for CSR*I
         if (d.rd != 0) {
             if (!s.csr.read(d.csr, s.priv, old_val))
                 return make_exception(CAUSE_ILLEGAL_INSTR, d.raw);
