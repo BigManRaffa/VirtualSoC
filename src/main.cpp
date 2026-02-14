@@ -19,7 +19,6 @@
 #include "cpu/rv32a.h"
 #include "cpu/trap.h"
 #include "cpu/iss.h"
-#include "cpu/iss.h"
 
 static int pass_count = 0;
 static int fail_count = 0;
