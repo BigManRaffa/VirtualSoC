@@ -1,8 +1,0 @@
-# CMake generated Testfile for 
-# Source directory: /mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-2.3.4/examples/tlm/lt
-# Build directory: /mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-2.3.4/build/examples/tlm/lt
-# 
-# This file includes the relevant testing commands required for 
-# testing this directory and lists subdirectories to be tested as well.
-add_test(examples/tlm/lt/lt "/usr/bin/cmake" "-DTEST_EXE=/mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-2.3.4/build/examples/tlm/lt/lt" "-DTEST_DIR=/mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-2.3.4/build/examples/tlm/lt" "-DTEST_INPUT=" "-DTEST_GOLDEN=/mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-2.3.4/examples/tlm/lt/results/expected.log" "-DTEST_FILTER=" "-DDIFF_COMMAND=/usr/bin/diff" "-DDIFF_OPTIONS=-u" "-P" "/mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-2.3.4/cmake/run_test.cmake")
-set_tests_properties(examples/tlm/lt/lt PROPERTIES  FAIL_REGULAR_EXPRESSION "^[*][*][*]ERROR" _BACKTRACE_TRIPLES "/mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-2.3.4/examples/CMakeLists.txt;137;add_test;/mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-2.3.4/examples/tlm/lt/CMakeLists.txt;61;configure_and_add_test;/mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-2.3.4/examples/tlm/lt/CMakeLists.txt;0;")

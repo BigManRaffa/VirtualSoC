@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG "CMakeFiles/gamingcpu-vp.dir/src/mem/memory.cpp.o" "CMakeFiles/gamingcpu-vp.dir/src/mem/bootrom.cpp.o" "CMakeFiles/gamingcpu-vp.dir/src/bus/tlm_bus.cpp.o" "CMakeFiles/gamingcpu-vp.dir/src/main.cpp.o" -o gamingcpu-vp  /mnt/c/Users/anime/Desktop/Programming/VirtualSoC/deps/systemc-install/lib/libsystemc.a -ldl 

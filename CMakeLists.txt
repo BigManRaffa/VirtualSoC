@@ -66,6 +66,9 @@ set(VP_SOURCES
     # Step 2: Bus
     src/bus/tlm_bus.cpp
 
+    # Steps 3-4: CPU decoder
+    src/cpu/decode.cpp
+
     # Entry point
     src/main.cpp
 )
