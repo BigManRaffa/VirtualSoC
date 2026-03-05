@@ -22,6 +22,8 @@
 #include "util/elf_loader.h"
 #include "irq/clint.h"
 #include "irq/plic.h"
+#include "io/uart.h"
+#include "platform/gamingcpu_vp.h"
 
 static int pass_count = 0;
 static int fail_count = 0;
@@ -59,6 +61,8 @@ struct TestInitiator : public sc_core::sc_module {
     ISS* iss_ptr = nullptr;
     CLINT* clint_ptr = nullptr;
     PLIC* plic_ptr = nullptr;
+    UART* uart_ptr = nullptr;
+    GamingCPU_VP* platform_ptr = nullptr;
 
     SC_HAS_PROCESS(TestInitiator);
 
@@ -1612,6 +1616,125 @@ struct TestInitiator : public sc_core::sc_module {
         plic_write(0x200000, 0);
     }
 
+    void step13_uart() {
+        std::cout << "\n--- Step 13: UART ---\n";
+
+        auto uart_read = [&](uint32_t offset) -> uint32_t {
+            uint32_t val = 0;
+            tlm::tlm_generic_payload trans;
+            sc_core::sc_time delay = sc_core::SC_ZERO_TIME;
+            setup_trans(trans, tlm::TLM_READ_COMMAND,
+                        cfg::UART_BASE + offset,
+                        reinterpret_cast<uint8_t*>(&val), 1);
+            bus_isock->b_transport(trans, delay);
+            return val & 0xFF;
+        };
+
+        auto uart_write = [&](uint32_t offset, uint8_t val) {
+            uint32_t v = val;
+            tlm::tlm_generic_payload trans;
+            sc_core::sc_time delay = sc_core::SC_ZERO_TIME;
+            setup_trans(trans, tlm::TLM_WRITE_COMMAND,
+                        cfg::UART_BASE + offset,
+                        reinterpret_cast<uint8_t*>(&v), 1);
+            bus_isock->b_transport(trans, delay);
+        };
+
+        // LSR should show TX empty + transmitter empty at startup
+        uint32_t lsr = uart_read(5);
+        check((lsr & 0x60) == 0x60, "UART LSR TX empty at init");
+        check((lsr & 0x01) == 0, "UART LSR no RX data at init");
+
+        // TX: write a byte, capture via callback
+        uint8_t tx_captured = 0;
+        uart_ptr->on_tx = [&](uint8_t c) { tx_captured = c; };
+        uart_write(0, 'H');
+        check(tx_captured == 'H', "UART TX callback fires");
+
+        // Scratch register round-trip
+        uart_write(7, 0xAB);
+        check(uart_read(7) == 0xAB, "UART scratch register");
+
+        // RX: push a byte, check LSR DR, then read it
+        uart_ptr->push_rx('X');
+        lsr = uart_read(5);
+        check((lsr & 0x01) == 1, "UART LSR DR after push_rx");
+
+        uint32_t rx = uart_read(0);
+        check(rx == 'X', "UART RX reads pushed byte");
+
+        // After reading, DR should clear
+        lsr = uart_read(5);
+        check((lsr & 0x01) == 0, "UART LSR DR clears after read");
+
+        // RX FIFO: push multiple, read in order
+        uart_ptr->push_rx('A');
+        uart_ptr->push_rx('B');
+        uart_ptr->push_rx('C');
+        check(uart_read(0) == 'A', "UART FIFO order A");
+        check(uart_read(0) == 'B', "UART FIFO order B");
+        check(uart_read(0) == 'C', "UART FIFO order C");
+
+        // IER / IRQ tests
+        bool irq_state = false;
+        uart_ptr->on_irq = [&](bool v) { irq_state = v; };
+
+        // Enable TX empty interrupt
+        uart_write(1, 0x02);
+        check(irq_state == true, "UART TX empty IRQ fires when enabled");
+
+        // IIR should indicate TX empty
+        uint32_t iir = uart_read(2);
+        check((iir & 0x0F) == 0x02, "UART IIR reports TX empty");
+
+        // Disable TX IRQ, enable RX IRQ
+        uart_write(1, 0x01);
+        check(irq_state == false, "UART IRQ clears with no RX data");
+
+        // Push RX data, IRQ should fire
+        uart_ptr->push_rx('Z');
+        check(irq_state == true, "UART RX avail IRQ fires");
+
+        iir = uart_read(2);
+        check((iir & 0x0F) == 0x04, "UART IIR reports RX avail");
+
+        // Read the byte, IRQ should clear
+        uart_read(0);
+        check(irq_state == false, "UART IRQ clears after RX read");
+
+        // LCR and MCR are just storage
+        uart_write(3, 0x1B);
+        check(uart_read(3) == 0x1B, "UART LCR round-trip");
+        uart_write(4, 0x0F);
+        check(uart_read(4) == 0x0F, "UART MCR round-trip");
+
+        // MSR always 0 (no modem)
+        check(uart_read(6) == 0, "UART MSR always 0");
+    }
+
+    void step14_platform() {
+        std::cout << "\n--- Step 14: Top-Level Platform ---\n";
+
+        // Give the platform ISS time to run its little program
+        wait(sc_core::sc_time(1, sc_core::SC_US));
+
+        auto& p = *platform_ptr;
+        auto& s = p.cpu.state;
+
+        check(p.cpu.insn_count > 0, "Platform ISS executed instructions");
+        check(s.get_reg(1) == 42, "Platform ISS x1 = 42");
+        check(s.get_reg(2) == 7, "Platform ISS x2 = 7");
+        check(s.get_reg(3) == 49, "Platform ISS x3 = 49");
+
+        // Verify UART TX went through the full wiring chain
+        // (cpu -> bus -> uart -> on_tx callback)
+        // x4 should be 'V' (0x56) from the test program
+        check(s.get_reg(4) == 0x56, "Platform ISS x4 = 'V'");
+
+        // Check CLINT mtime is ticking (we waited 1us, tick=100ns -> ~10 ticks)
+        check(p.clint.get_mtime() > 0, "Platform CLINT mtime ticking");
+    }
+
     void run_tests() {
         step1_memory();
         step2_bus();
@@ -1624,6 +1747,8 @@ struct TestInitiator : public sc_core::sc_module {
         step10_elf_loader();
         step11_clint();
         step12_plic();
+        step13_uart();
+        step14_platform();
         sc_core::sc_stop();
     }
 };
@@ -1673,6 +1798,12 @@ int sc_main(int, char*[])
     bus.map(cfg::PLIC_BASE, cfg::PLIC_SIZE);
     tester.plic_ptr = &plic;
 
+    // Step 13: UART
+    UART uart("uart");
+    bus.isock.bind(uart.tsock);
+    bus.map(cfg::UART_BASE, cfg::UART_SIZE);
+    tester.uart_ptr = &uart;
+
     // Step 9: ISS wired through bus to RAM
     ISS iss("iss", cfg::RAM_BASE);
     iss.stop_on_ebreak = true;
@@ -1704,6 +1835,32 @@ int sc_main(int, char*[])
         0x9002439D,
     };
     std::memcpy(ram.data(), program, sizeof(program));
+
+    // Step 14: Full platform instance with its own ISS/bus/RAM/etc
+    GamingCPU_VP platform("platform");
+    platform.cpu.stop_on_ebreak = true;
+    tester.platform_ptr = &platform;
+
+    // Test program for platform ISS:
+    //   addi x1, x0, 42       ; x1 = 42
+    //   addi x2, x0, 7        ; x2 = 7
+    //   add  x3, x1, x2       ; x3 = 49
+    //   lui  x4, 0x10000      ; x4 = UART_BASE (0x10000000)
+    //   addi x5, x0, 0x56     ; x5 = 'V'
+    //   sb   x5, 0(x4)        ; UART TX <- 'V'
+    //   addi x4, x5, 0        ; x4 = 0x56 (save for test check)
+    //   ebreak
+    uint32_t plat_prog[] = {
+        0x02A00093, // addi x1, x0, 42
+        0x00700113, // addi x2, x0, 7
+        0x002081B3, // add  x3, x1, x2
+        0x10000237, // lui  x4, 0x10000
+        0x05600293, // addi x5, x0, 0x56
+        0x00520023, // sb   x5, 0(x4)
+        0x00028213, // addi x4, x5, 0
+        0x00100073, // ebreak
+    };
+    std::memcpy(platform.ram.data(), plat_prog, sizeof(plat_prog));
 
     sc_core::sc_start();
 

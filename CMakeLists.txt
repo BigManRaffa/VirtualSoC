@@ -92,6 +92,12 @@ set(VP_SOURCES
     # Step 12: PLIC
     src/irq/plic.cpp
 
+    # Step 13: UART
+    src/io/uart.cpp
+
+    # Step 14: Top-level platform
+    src/platform/gamingcpu_vp.cpp
+
     # Entry point
     src/main.cpp
 )
