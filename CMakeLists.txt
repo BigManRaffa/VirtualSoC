@@ -101,6 +101,19 @@ set(VP_SOURCES
     # Step 14: Top-level platform
     src/platform/gamingcpu_vp.cpp
 
+    # Peripherals
+    src/io/gpio.cpp
+    src/io/timer.cpp
+    src/io/spi.cpp
+    src/sd/sd_card_model.cpp
+    src/sd/sd_ctrl.cpp
+    src/dma/dma_engine.cpp
+    src/video/fb_ctrl.cpp
+    src/video/palette.cpp
+    src/audio/audio_out.cpp
+    src/debug/gdb_server.cpp
+    src/util/logging.cpp
+
     # Entry point
     src/main.cpp
 )

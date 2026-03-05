@@ -25,6 +25,16 @@
 #include "irq/plic.h"
 #include "io/uart.h"
 #include "platform/gamingcpu_vp.h"
+#include "io/gpio.h"
+#include "io/timer.h"
+#include "io/spi.h"
+#include "sd/sd_ctrl.h"
+#include "sd/sd_card_model.h"
+#include "dma/dma_engine.h"
+#include "video/fb_ctrl.h"
+#include "video/palette.h"
+#include "audio/audio_out.h"
+#include "util/logging.h"
 
 static int pass_count = 0;
 static int fail_count = 0;
@@ -64,6 +74,17 @@ struct TestInitiator : public sc_core::sc_module {
     PLIC* plic_ptr = nullptr;
     UART* uart_ptr = nullptr;
     GamingCPU_VP* platform_ptr = nullptr;
+    GPIO* gpio_ptr = nullptr;
+    Timer* timer_ptr = nullptr;
+    SPI* spi_ptr = nullptr;
+    FBCtrl* fb_ptr = nullptr;
+    AudioOut* audio_ptr = nullptr;
+    // Initiator sockets for direct peripheral testing
+    tlm_utils::simple_initiator_socket<TestInitiator> gpio_isock;
+    tlm_utils::simple_initiator_socket<TestInitiator> timer_isock;
+    tlm_utils::simple_initiator_socket<TestInitiator> spi_isock;
+    tlm_utils::simple_initiator_socket<TestInitiator> fb_isock;
+    tlm_utils::simple_initiator_socket<TestInitiator> audio_isock;
 
     SC_HAS_PROCESS(TestInitiator);
 
@@ -71,7 +92,12 @@ struct TestInitiator : public sc_core::sc_module {
         : sc_module(name),
           mem_isock("mem_isock"),
           rom_isock("rom_isock"),
-          bus_isock("bus_isock")
+          bus_isock("bus_isock"),
+          gpio_isock("gpio_isock"),
+          timer_isock("timer_isock"),
+          spi_isock("spi_isock"),
+          fb_isock("fb_isock"),
+          audio_isock("audio_isock")
     {
         SC_THREAD(run_tests);
     }
@@ -1889,6 +1915,230 @@ struct TestInitiator : public sc_core::sc_module {
         check(p.clint.get_mtime() > 0, "Platform CLINT mtime ticking");
     }
 
+    void step15_gpio() {
+        std::cout << "\n--- Step 15: GPIO ---\n";
+
+        auto gpio_read = [&](uint32_t offset) -> uint32_t {
+            uint32_t val = 0;
+            tlm::tlm_generic_payload trans;
+            sc_core::sc_time delay = sc_core::SC_ZERO_TIME;
+            setup_trans(trans, tlm::TLM_READ_COMMAND, offset,
+                        reinterpret_cast<uint8_t*>(&val), 4);
+            gpio_isock->b_transport(trans, delay);
+            return val;
+        };
+
+        auto gpio_write = [&](uint32_t offset, uint32_t val) {
+            tlm::tlm_generic_payload trans;
+            sc_core::sc_time delay = sc_core::SC_ZERO_TIME;
+            setup_trans(trans, tlm::TLM_WRITE_COMMAND, offset,
+                        reinterpret_cast<uint8_t*>(&val), 4);
+            gpio_isock->b_transport(trans, delay);
+        };
+
+        // Direction register
+        gpio_write(0x00, 0xFF);
+        check(gpio_read(0x00) == 0xFF, "GPIO direction readback");
+
+        // Output register
+        gpio_write(0x04, 0x42);
+        check(gpio_read(0x04) == 0x42, "GPIO output readback");
+
+        gpio_ptr->set_input(0xAA);
+        check(gpio_read(0x08) == 0xAA, "GPIO input read");
+
+        bool gpio_irq = false;
+        gpio_ptr->on_irq = [&](bool v) { gpio_irq = v; };
+        gpio_write(0x0C, 0x01);
+        gpio_ptr->set_input(0xAB);
+        check(gpio_irq, "GPIO IRQ on input change");
+        check(gpio_read(0x10) == 0x01, "GPIO IRQ status bit set");
+
+        // Write-1-to-clear
+        gpio_write(0x10, 0x01);
+        check(gpio_read(0x10) == 0x00, "GPIO IRQ status w1c");
+        check(!gpio_irq, "GPIO IRQ clears after w1c");
+    }
+
+    void step16_timer() {
+        std::cout << "\n--- Step 16: Timer64 ---\n";
+
+        auto timer_read = [&](uint32_t offset) -> uint32_t {
+            uint32_t val = 0;
+            tlm::tlm_generic_payload trans;
+            sc_core::sc_time delay = sc_core::SC_ZERO_TIME;
+            setup_trans(trans, tlm::TLM_READ_COMMAND, offset,
+                        reinterpret_cast<uint8_t*>(&val), 4);
+            timer_isock->b_transport(trans, delay);
+            return val;
+        };
+
+        auto timer_write = [&](uint32_t offset, uint32_t val) {
+            tlm::tlm_generic_payload trans;
+            sc_core::sc_time delay = sc_core::SC_ZERO_TIME;
+            setup_trans(trans, tlm::TLM_WRITE_COMMAND, offset,
+                        reinterpret_cast<uint8_t*>(&val), 4);
+            timer_isock->b_transport(trans, delay);
+        };
+
+        // Write and read time
+        timer_write(0x00, 0x100);
+        check(timer_read(0x00) == 0x100, "Timer time_lo readback");
+
+        bool timer_irq = false;
+        timer_ptr->on_irq = [&](bool v) { timer_irq = v; };
+        timer_write(0x10, 1); // ctrl = enable
+        timer_write(0x08, 50); timer_write(0x0C, 0); // cmp = 50
+        timer_write(0x04, 0); timer_write(0x00, 49); // time = 49
+        check(!timer_irq, "Timer no IRQ below cmp");
+        timer_write(0x00, 50); // time = 50
+        check(timer_irq, "Timer IRQ at cmp");
+
+        // Tick thread
+        uint64_t before = timer_ptr->get_time();
+        wait(sc_core::sc_time(500, sc_core::SC_NS));
+        check(timer_ptr->get_time() > before, "Timer ticks via thread");
+    }
+
+    void step17_spi() {
+        std::cout << "\n--- Step 17: SPI ---\n";
+
+        auto spi_read = [&](uint32_t offset) -> uint32_t {
+            uint32_t val = 0;
+            tlm::tlm_generic_payload trans;
+            sc_core::sc_time delay = sc_core::SC_ZERO_TIME;
+            setup_trans(trans, tlm::TLM_READ_COMMAND, offset,
+                        reinterpret_cast<uint8_t*>(&val), 4);
+            spi_isock->b_transport(trans, delay);
+            return val;
+        };
+
+        auto spi_write = [&](uint32_t offset, uint32_t val) {
+            tlm::tlm_generic_payload trans;
+            sc_core::sc_time delay = sc_core::SC_ZERO_TIME;
+            setup_trans(trans, tlm::TLM_WRITE_COMMAND, offset,
+                        reinterpret_cast<uint8_t*>(&val), 4);
+            spi_isock->b_transport(trans, delay);
+        };
+
+        // Status always ready
+        check(spi_read(0x08) == 1, "SPI always ready");
+
+        // Transfer callback
+        spi_ptr->on_transfer = [](uint8_t tx) -> uint8_t { return tx ^ 0xFF; };
+        spi_write(0x00, 0x42);
+        check(spi_read(0x04) == (0x42 ^ 0xFF), "SPI transfer callback");
+
+        // Config registers accepted
+        spi_write(0x0C, 100);
+        check(spi_read(0x0C) == 100, "SPI clk_div readback");
+        spi_write(0x10, 3);
+        check(spi_read(0x10) == 3, "SPI config readback");
+    }
+
+    void step18_video() {
+        std::cout << "\n--- Step 18: Video ---\n";
+
+        auto fb_read = [&](uint32_t offset) -> uint32_t {
+            uint32_t val = 0;
+            tlm::tlm_generic_payload trans;
+            sc_core::sc_time delay = sc_core::SC_ZERO_TIME;
+            setup_trans(trans, tlm::TLM_READ_COMMAND, offset,
+                        reinterpret_cast<uint8_t*>(&val), 4);
+            fb_isock->b_transport(trans, delay);
+            return val;
+        };
+
+        auto fb_write = [&](uint32_t offset, uint32_t val) {
+            tlm::tlm_generic_payload trans;
+            sc_core::sc_time delay = sc_core::SC_ZERO_TIME;
+            setup_trans(trans, tlm::TLM_WRITE_COMMAND, offset,
+                        reinterpret_cast<uint8_t*>(&val), 4);
+            fb_isock->b_transport(trans, delay);
+        };
+
+        // Default values
+        check(fb_read(0x00) == cfg::FB0_DEFAULT, "FB fb0 default");
+        check(fb_read(0x04) == cfg::FB1_DEFAULT, "FB fb1 default");
+        check(fb_read(0x08) == 320, "FB stride default");
+
+        // Vsync triggers swap and callback
+        uint32_t vsync_fb = 0;
+        fb_ptr->on_vsync = [&](uint32_t addr, uint32_t, uint32_t) { vsync_fb = addr; };
+        bool fb_irq = false;
+        fb_ptr->on_irq = [&](bool v) { fb_irq = v; };
+
+        fb_write(0x10, 1); // vsync
+        check(vsync_fb == cfg::FB1_DEFAULT, "FB vsync swaps to fb1");
+        check(fb_irq, "FB vsync IRQ");
+        check((fb_read(0x14) & 1) == 1, "FB active buffer = 1");
+        check((fb_read(0x14) & 2) == 2, "FB vsync pending");
+
+        // Clear vsync status
+        fb_write(0x14, 0);
+        check(!fb_irq, "FB IRQ clears");
+
+        // Palette utilities
+        uint8_t playpal[768];
+        for (int i = 0; i < 256; i++) {
+            playpal[i*3+0] = i;
+            playpal[i*3+1] = 255 - i;
+            playpal[i*3+2] = i / 2;
+        }
+        palette::RGB pal[256];
+        palette::load_playpal(playpal, 0, pal);
+        check(pal[42].r == 42 && pal[42].g == 213 && pal[42].b == 21, "Palette load correct");
+
+        uint8_t cmap[256];
+        for (int i = 0; i < 256; i++) cmap[i] = 255 - i;
+        check(palette::apply_colormap(cmap, 0, 100) == 155, "Colormap apply correct");
+    }
+
+    void step19_audio() {
+        std::cout << "\n--- Step 19: Audio ---\n";
+
+        auto audio_read = [&](uint32_t offset) -> uint32_t {
+            uint32_t val = 0;
+            tlm::tlm_generic_payload trans;
+            sc_core::sc_time delay = sc_core::SC_ZERO_TIME;
+            setup_trans(trans, tlm::TLM_READ_COMMAND, offset,
+                        reinterpret_cast<uint8_t*>(&val), 4);
+            audio_isock->b_transport(trans, delay);
+            return val;
+        };
+
+        auto audio_write = [&](uint32_t offset, uint32_t val) {
+            tlm::tlm_generic_payload trans;
+            sc_core::sc_time delay = sc_core::SC_ZERO_TIME;
+            setup_trans(trans, tlm::TLM_WRITE_COMMAND, offset,
+                        reinterpret_cast<uint8_t*>(&val), 4);
+            audio_isock->b_transport(trans, delay);
+        };
+
+        // Defaults
+        check(audio_read(0x00) == cfg::AUDIO_RING_DEFAULT, "Audio ring_base default");
+        check(audio_read(0x04) == cfg::AUDIO_RING_SIZE_DEFAULT, "Audio ring_size default");
+        check(audio_read(0x10) == 11025, "Audio sample_rate default");
+
+        // Register round-trips
+        audio_write(0x00, 0x90000000);
+        check(audio_read(0x00) == 0x90000000, "Audio ring_base write");
+        audio_write(0x0C, 512);
+        check(audio_read(0x0C) == 512, "Audio wr_ptr write");
+        audio_write(0x14, 1);
+        check(audio_read(0x14) == 1, "Audio ctrl enable");
+    }
+
+    void step20_logging() {
+        std::cout << "\n--- Step 20: Logging ---\n";
+
+        check(!logging::is_trace_enabled(), "Logging default off");
+        logging::set_trace_enabled(true);
+        check(logging::is_trace_enabled(), "Logging enable");
+        logging::set_trace_enabled(false);
+        check(!logging::is_trace_enabled(), "Logging disable");
+    }
+
     void run_tests() {
         step1_memory();
         step2_bus();
@@ -1904,6 +2154,12 @@ struct TestInitiator : public sc_core::sc_module {
         step12_plic();
         step13_uart();
         step14_platform();
+        step15_gpio();
+        step16_timer();
+        step17_spi();
+        step18_video();
+        step19_audio();
+        step20_logging();
         sc_core::sc_stop();
     }
 };
@@ -1958,6 +2214,27 @@ int sc_main(int, char*[])
     bus.isock.bind(uart.tsock);
     bus.map(cfg::UART_BASE, cfg::UART_SIZE);
     tester.uart_ptr = &uart;
+
+    // Peripherals for direct testing (not through bus)
+    GPIO test_gpio("test_gpio");
+    tester.gpio_isock.bind(test_gpio.tsock);
+    tester.gpio_ptr = &test_gpio;
+
+    Timer test_timer("test_timer", sc_core::sc_time(100, sc_core::SC_NS));
+    tester.timer_isock.bind(test_timer.tsock);
+    tester.timer_ptr = &test_timer;
+
+    SPI test_spi("test_spi");
+    tester.spi_isock.bind(test_spi.tsock);
+    tester.spi_ptr = &test_spi;
+
+    FBCtrl test_fb("test_fb");
+    tester.fb_isock.bind(test_fb.tsock);
+    tester.fb_ptr = &test_fb;
+
+    AudioOut test_audio("test_audio");
+    tester.audio_isock.bind(test_audio.tsock);
+    tester.audio_ptr = &test_audio;
 
     // Step 9: ISS wired through bus to RAM
     ISS iss("iss", cfg::RAM_BASE);
