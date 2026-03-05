@@ -89,6 +89,9 @@ set(VP_SOURCES
     # Step 11: CLINT
     src/irq/clint.cpp
 
+    # Step 12: PLIC
+    src/irq/plic.cpp
+
     # Entry point
     src/main.cpp
 )

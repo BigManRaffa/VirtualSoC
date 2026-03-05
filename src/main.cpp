@@ -21,6 +21,7 @@
 #include "cpu/iss.h"
 #include "util/elf_loader.h"
 #include "irq/clint.h"
+#include "irq/plic.h"
 
 static int pass_count = 0;
 static int fail_count = 0;
@@ -57,6 +58,7 @@ struct TestInitiator : public sc_core::sc_module {
 
     ISS* iss_ptr = nullptr;
     CLINT* clint_ptr = nullptr;
+    PLIC* plic_ptr = nullptr;
 
     SC_HAS_PROCESS(TestInitiator);
 
@@ -1513,6 +1515,103 @@ struct TestInitiator : public sc_core::sc_module {
         check(after > before, "CLINT mtime increments via tick_thread");
     }
 
+    void step12_plic() {
+        std::cout << "\n--- Step 12: PLIC ---\n";
+
+        auto plic_read = [&](uint32_t offset) -> uint32_t {
+            uint32_t val = 0;
+            tlm::tlm_generic_payload trans;
+            sc_core::sc_time delay = sc_core::SC_ZERO_TIME;
+            setup_trans(trans, tlm::TLM_READ_COMMAND,
+                        cfg::PLIC_BASE + offset,
+                        reinterpret_cast<uint8_t*>(&val), 4);
+            bus_isock->b_transport(trans, delay);
+            return val;
+        };
+
+        auto plic_write = [&](uint32_t offset, uint32_t val) {
+            tlm::tlm_generic_payload trans;
+            sc_core::sc_time delay = sc_core::SC_ZERO_TIME;
+            setup_trans(trans, tlm::TLM_WRITE_COMMAND,
+                        cfg::PLIC_BASE + offset,
+                        reinterpret_cast<uint8_t*>(&val), 4);
+            bus_isock->b_transport(trans, delay);
+        };
+
+        bool ext_irq = false;
+        plic_ptr->on_external_irq = [&](bool v) { ext_irq = v; };
+
+        // Set UART (source 1) priority to 5
+        plic_write(cfg::IRQ_UART * 4, 5);
+        check(plic_read(cfg::IRQ_UART * 4) == 5, "PLIC priority write/read");
+
+        // Source 0 priority is hardwired to 0
+        plic_write(0, 7);
+        check(plic_read(0) == 0, "PLIC source 0 priority stuck at 0");
+
+        // Priority clamps to 3 bits
+        plic_write(cfg::IRQ_GPIO * 4, 0xFF);
+        check(plic_read(cfg::IRQ_GPIO * 4) == 7, "PLIC priority clamps to 0-7");
+
+        // Enable UART interrupt
+        plic_write(0x2000, (1u << cfg::IRQ_UART));
+        check(plic_read(0x2000) == (1u << cfg::IRQ_UART), "PLIC enable readback");
+
+        // No pending yet, no IRQ
+        check(ext_irq == false, "PLIC no IRQ without pending");
+
+        // Set UART pending via set_pending API
+        plic_ptr->set_pending(cfg::IRQ_UART, true);
+        check(plic_read(0x1000) & (1u << cfg::IRQ_UART), "PLIC pending bit set");
+        check(ext_irq == true, "PLIC asserts external IRQ");
+
+        // Claim should return UART source ID
+        uint32_t claimed = plic_read(0x200004);
+        check(claimed == cfg::IRQ_UART, "PLIC claim returns UART");
+
+        // After claim, IRQ deasserts (no more pending+enabled unclaimed)
+        check(ext_irq == false, "PLIC IRQ clears after claim");
+
+        // Second claim returns 0 (nothing left)
+        check(plic_read(0x200004) == 0, "PLIC second claim returns 0");
+
+        // Complete the UART interrupt
+        plic_write(0x200004, cfg::IRQ_UART);
+
+        // Priority-based arbitration: GPIO(prio 7) beats UART(prio 5)
+        plic_write(cfg::IRQ_GPIO * 4, 7);
+        plic_write(0x2000, (1u << cfg::IRQ_UART) | (1u << cfg::IRQ_GPIO));
+        plic_ptr->set_pending(cfg::IRQ_UART, true);
+        plic_ptr->set_pending(cfg::IRQ_GPIO, true);
+        claimed = plic_read(0x200004);
+        check(claimed == cfg::IRQ_GPIO, "PLIC higher priority wins");
+
+        // UART still pending, claim again
+        claimed = plic_read(0x200004);
+        check(claimed == cfg::IRQ_UART, "PLIC second claim gets UART");
+
+        // Complete both
+        plic_write(0x200004, cfg::IRQ_GPIO);
+        plic_write(0x200004, cfg::IRQ_UART);
+
+        // Threshold test: set threshold to 5, UART(prio 5) should be masked
+        plic_write(0x200000, 5);
+        check(plic_read(0x200000) == 5, "PLIC threshold readback");
+        plic_ptr->set_pending(cfg::IRQ_UART, true);
+        check(ext_irq == false, "PLIC masks IRQ at or below threshold");
+
+        // GPIO(prio 7) still beats threshold of 5
+        plic_ptr->set_pending(cfg::IRQ_GPIO, true);
+        check(ext_irq == true, "PLIC IRQ above threshold fires");
+
+        // Clean up
+        plic_read(0x200004); // claim GPIO
+        plic_read(0x200004); // claim UART
+        plic_write(0x200004, cfg::IRQ_GPIO);
+        plic_write(0x200004, cfg::IRQ_UART);
+        plic_write(0x200000, 0);
+    }
+
     void run_tests() {
         step1_memory();
         step2_bus();
@@ -1524,6 +1623,7 @@ struct TestInitiator : public sc_core::sc_module {
         step9_iss();
         step10_elf_loader();
         step11_clint();
+        step12_plic();
         sc_core::sc_stop();
     }
 };
@@ -1566,6 +1666,12 @@ int sc_main(int, char*[])
     bus.isock.bind(clint.tsock);
     bus.map(cfg::CLINT_BASE, cfg::CLINT_SIZE);
     tester.clint_ptr = &clint;
+
+    // Step 12: PLIC
+    PLIC plic("plic");
+    bus.isock.bind(plic.tsock);
+    bus.map(cfg::PLIC_BASE, cfg::PLIC_SIZE);
+    tester.plic_ptr = &plic;
 
     // Step 9: ISS wired through bus to RAM
     ISS iss("iss", cfg::RAM_BASE);
