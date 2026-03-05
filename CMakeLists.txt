@@ -86,6 +86,9 @@ set(VP_SOURCES
     # Step 10: ELF Loader
     src/util/elf_loader.cpp
 
+    # Step 11: CLINT
+    src/irq/clint.cpp
+
     # Entry point
     src/main.cpp
 )

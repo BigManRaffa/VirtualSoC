@@ -20,6 +20,7 @@
 #include "cpu/trap.h"
 #include "cpu/iss.h"
 #include "util/elf_loader.h"
+#include "irq/clint.h"
 
 static int pass_count = 0;
 static int fail_count = 0;
@@ -55,6 +56,7 @@ struct TestInitiator : public sc_core::sc_module {
     tlm_utils::simple_initiator_socket<TestInitiator> bus_isock;
 
     ISS* iss_ptr = nullptr;
+    CLINT* clint_ptr = nullptr;
 
     SC_HAS_PROCESS(TestInitiator);
 
@@ -1431,6 +1433,86 @@ struct TestInitiator : public sc_core::sc_module {
         check(caught, "ELF rejects 64-bit");
     }
 
+    void step11_clint() {
+        std::cout << "\n--- Step 11: CLINT ---\n";
+
+        // Test register access via the bus (CLINT is mapped at cfg::CLINT_BASE)
+        auto clint_read = [&](uint32_t offset) -> uint32_t {
+            uint32_t val = 0;
+            tlm::tlm_generic_payload trans;
+            sc_core::sc_time delay = sc_core::SC_ZERO_TIME;
+            setup_trans(trans, tlm::TLM_READ_COMMAND,
+                        cfg::CLINT_BASE + offset,
+                        reinterpret_cast<uint8_t*>(&val), 4);
+            bus_isock->b_transport(trans, delay);
+            return val;
+        };
+
+        auto clint_write = [&](uint32_t offset, uint32_t val) {
+            tlm::tlm_generic_payload trans;
+            sc_core::sc_time delay = sc_core::SC_ZERO_TIME;
+            setup_trans(trans, tlm::TLM_WRITE_COMMAND,
+                        cfg::CLINT_BASE + offset,
+                        reinterpret_cast<uint8_t*>(&val), 4);
+            bus_isock->b_transport(trans, delay);
+        };
+
+        // msip defaults to 0
+        check(clint_read(0x0000) == 0, "CLINT msip defaults 0");
+
+        // Write and read back msip (only bit 0 matters)
+        clint_write(0x0000, 0xDEADBEEF);
+        check(clint_read(0x0000) == 1, "CLINT msip masks to bit 0");
+
+        // Check sw_irq callback fired
+        bool sw_irq_seen = false;
+        clint_ptr->on_sw_irq = [&](bool v) { sw_irq_seen = v; };
+        clint_write(0x0000, 1);
+        check(sw_irq_seen == true, "CLINT msip triggers sw_irq callback");
+        clint_write(0x0000, 0);
+        check(sw_irq_seen == false, "CLINT msip=0 clears sw_irq");
+
+        // Write mtimecmp lo/hi and read back
+        clint_write(0x4000, 0x12345678);
+        clint_write(0x4004, 0xAABBCCDD);
+        check(clint_read(0x4000) == 0x12345678, "CLINT mtimecmp_lo readback");
+        check(clint_read(0x4004) == 0xAABBCCDD, "CLINT mtimecmp_hi readback");
+
+        // Write mtime directly and read back
+        clint_write(0xBFF8, 0x00000042);
+        clint_write(0xBFFC, 0x00000000);
+        check(clint_read(0xBFF8) == 0x42, "CLINT mtime_lo readback");
+        check(clint_read(0xBFFC) == 0x00, "CLINT mtime_hi readback");
+
+        // Timer IRQ test: set mtime >= mtimecmp, callback should fire
+        bool timer_irq_seen = false;
+        clint_ptr->on_timer_irq = [&](bool v) { timer_irq_seen = v; };
+
+        // Set mtimecmp to 100
+        clint_write(0x4000, 100);
+        clint_write(0x4004, 0);
+
+        // Set mtime to 99, should NOT fire
+        clint_write(0xBFF8, 99);
+        clint_write(0xBFFC, 0);
+        check(timer_irq_seen == false, "CLINT no IRQ when mtime < mtimecmp");
+
+        // Set mtime to 100, should fire
+        clint_write(0xBFF8, 100);
+        check(timer_irq_seen == true, "CLINT IRQ when mtime >= mtimecmp");
+
+        // Raise mtimecmp to clear IRQ
+        timer_irq_seen = true;
+        clint_write(0x4000, 200);
+        check(timer_irq_seen == false, "CLINT IRQ clears when mtimecmp raised");
+
+        // Let simulation advance so tick_thread runs a couple ticks
+        uint64_t before = clint_ptr->get_mtime();
+        wait(sc_core::sc_time(300, sc_core::SC_NS));
+        uint64_t after = clint_ptr->get_mtime();
+        check(after > before, "CLINT mtime increments via tick_thread");
+    }
+
     void run_tests() {
         step1_memory();
         step2_bus();
@@ -1441,6 +1523,7 @@ struct TestInitiator : public sc_core::sc_module {
         step7_trap();
         step9_iss();
         step10_elf_loader();
+        step11_clint();
         sc_core::sc_stop();
     }
 };
@@ -1477,6 +1560,12 @@ int sc_main(int, char*[])
     bus.map(cfg::SRAM_BASE, cfg::SRAM_SIZE);
     bus.isock.bind(ram.tsock);
     bus.map(cfg::RAM_BASE, 0x100000);
+
+    // Step 11: CLINT (100ns tick = 10MHz mtime clock)
+    CLINT clint("clint", sc_core::sc_time(100, sc_core::SC_NS));
+    bus.isock.bind(clint.tsock);
+    bus.map(cfg::CLINT_BASE, cfg::CLINT_SIZE);
+    tester.clint_ptr = &clint;
 
     // Step 9: ISS wired through bus to RAM
     ISS iss("iss", cfg::RAM_BASE);
