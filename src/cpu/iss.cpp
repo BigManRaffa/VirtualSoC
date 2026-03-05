@@ -74,6 +74,22 @@ uint8_t ISS::effective_data_priv() const {
     return state.priv;
 }
 
+void ISS::halt() {
+    halted_ = true;
+}
+
+void ISS::resume() {
+    halted_ = false;
+    single_step_ = false;
+    resume_event_.notify();
+}
+
+void ISS::step() {
+    halted_ = false;
+    single_step_ = true;
+    resume_event_.notify();
+}
+
 void ISS::run() {
     tlm_utils::tlm_quantumkeeper qk;
     tlm_utils::tlm_quantumkeeper::set_global_quantum(
@@ -83,6 +99,13 @@ void ISS::run() {
     state.pc = reset_pc_;
 
     while (true) {
+        if (halted_) {
+            halted_event.notify();
+            wait(resume_event_);
+            qk.reset();
+            continue;
+        }
+
         uint32_t irq = trap::check_pending_interrupts(state);
         if (irq) {
             trap::take_trap(state, irq, 0);
@@ -128,14 +151,14 @@ void ISS::run() {
         state.csr.inc_mcycle();
         state.csr.inc_minstret();
 
-        // 7. Handle execution exceptions
         if (r.exception) {
-            if (stop_on_ebreak && r.cause == rv32::CAUSE_BREAKPOINT)
-                return;
+            if (r.cause == rv32::CAUSE_BREAKPOINT && stop_on_ebreak) {
+                halted_ = true;
+                continue;
+            }
             trap::take_trap(state, r.cause, r.tval);
         }
 
-        // 8. Handle special instructions
         if (r.wfi) {
             qk.sync();
             wait(sc_core::sc_time(cfg::DEFAULT_QUANTUM_US, sc_core::SC_US),
@@ -151,7 +174,11 @@ void ISS::run() {
 
         state.pc = state.next_pc;
 
-        // 9. Advance time
+        if (single_step_) {
+            halted_ = true;
+            single_step_ = false;
+        }
+
         qk.inc(clk_period_);
         if (qk.need_sync())
             qk.sync();

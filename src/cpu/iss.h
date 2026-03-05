@@ -21,17 +21,21 @@ public:
     bool stop_on_ebreak = false;
     uint64_t insn_count = 0;
 
-    // Wake from WFI when interrupt state changes
     void notify_wfi() { wfi_event_.notify(); }
+
+    // GDB debug control
+    void halt();
+    void resume();
+    void step();
+    sc_core::sc_event halted_event;
+
+    // Physical bus access (GDB uses these for memory read/write)
+    uint32_t bus_read(uint32_t paddr, int bytes);
+    void bus_write(uint32_t paddr, uint32_t data, int bytes);
 
 private:
     void run();
 
-    // Physical bus access (bypasses MMU)
-    uint32_t bus_read(uint32_t paddr, int bytes);
-    void bus_write(uint32_t paddr, uint32_t data, int bytes);
-
-    // MMU helpers
     bool mmu_active_fetch() const;
     bool mmu_active_data() const;
     uint8_t effective_data_priv() const;
@@ -42,8 +46,11 @@ private:
     uint32_t reset_pc_;
     sc_core::sc_time clk_period_;
     sc_core::sc_event wfi_event_;
+    sc_core::sc_event resume_event_;
 
-    // Memory fault signaling from mem callbacks back to run loop
+    bool halted_ = false;
+    bool single_step_ = false;
+
     bool mem_fault_ = false;
     uint32_t mem_fault_cause_ = 0;
     uint32_t mem_fault_vaddr_ = 0;
