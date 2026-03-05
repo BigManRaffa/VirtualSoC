@@ -80,6 +80,9 @@ set(VP_SOURCES
     # Step 7: Trap handler
     src/cpu/trap.cpp
 
+    # Step 8: MMU
+    src/cpu/mmu.cpp
+
     # Step 9: ISS (Instruction Set Simulator)
     src/cpu/iss.cpp
 

@@ -18,6 +18,7 @@
 #include "cpu/rv32m.h"
 #include "cpu/rv32a.h"
 #include "cpu/trap.h"
+#include "cpu/mmu.h"
 #include "cpu/iss.h"
 #include "util/elf_loader.h"
 #include "irq/clint.h"
@@ -1318,6 +1319,159 @@ struct TestInitiator : public sc_core::sc_module {
         }
     }
 
+    void step8_mmu() {
+        std::cout << "\n--- Step 8: MMU (Sv32) ---\n";
+        using namespace rv32;
+
+        // Simulated physical memory for page tables (1MB should be plenty)
+        std::vector<uint32_t> pmem(256 * 1024, 0);
+        auto pmem_read = [&](uint32_t addr) -> uint32_t {
+            return pmem[addr / 4];
+        };
+        auto pmem_write = [&](uint32_t addr, uint32_t val) {
+            pmem[addr / 4] = val;
+        };
+
+        MMU mmu;
+        mmu.mem_read = pmem_read;
+        mmu.mem_write = pmem_write;
+
+        // Build a simple Sv32 page table:
+        // Root table at physical page 1 (addr 0x1000)
+        // L2 table at physical page 2 (addr 0x2000)
+        // Map vaddr 0x00400000 (VPN1=1, VPN0=0) -> paddr 0x80000000 (4KB page)
+        // Map vaddr 0x00800000 (VPN1=2, VPN0=0) -> paddr 0x80400000 (4MB superpage)
+
+        uint32_t root_ppn = 1;
+        uint32_t satp = (SATP_MODE_SV32 << SATP_MODE_SHIFT) | root_ppn;
+
+        // L1 PTE at root[1] -> points to L2 table at page 2
+        uint32_t l2_ppn = 2;
+        pmem[0x1000/4 + 1] = (l2_ppn << PTE_PPN_SHIFT) | PTE_V;
+
+        // L2 PTE at l2_table[0] -> leaf mapping to phys page 0x80000 (paddr 0x80000000)
+        uint32_t target_ppn = 0x80000;
+        pmem[0x2000/4 + 0] = (target_ppn << PTE_PPN_SHIFT) | PTE_V | PTE_R | PTE_W | PTE_X | PTE_U;
+
+        // L1 PTE at root[2] -> 4MB superpage at phys 0x80400000 (PPN=0x80400, PPN[0] must be 0)
+        // PPN for superpage: PPN1=0x201, PPN0=0x000 -> full PPN = 0x80400
+        uint32_t super_ppn = 0x80400;
+        pmem[0x1000/4 + 2] = (super_ppn << PTE_PPN_SHIFT) | PTE_V | PTE_R | PTE_W | PTE_X;
+
+        // Test 1: Basic translation (4KB page, U-mode)
+        auto r = mmu.translate(0x00400ABC, AccessType::LOAD, PRV_U, satp, 0);
+        check(!r.fault, "MMU 4KB page translates");
+        check(r.paddr == 0x80000ABC, "MMU 4KB paddr correct");
+
+        // Test 2: A bit should have been set
+        uint32_t pte_after = pmem[0x2000/4 + 0];
+        check((pte_after & PTE_A) != 0, "MMU sets A bit on read");
+
+        // Test 3: Store sets D bit
+        mmu.flush_tlb();
+        r = mmu.translate(0x00400000, AccessType::STORE, PRV_U, satp, 0);
+        check(!r.fault, "MMU store translates");
+        pte_after = pmem[0x2000/4 + 0];
+        check((pte_after & PTE_D) != 0, "MMU sets D bit on store");
+
+        // Test 4: Superpage translation
+        mmu.flush_tlb();
+        r = mmu.translate(0x00800123, AccessType::LOAD, PRV_S, satp, 0);
+        check(!r.fault, "MMU 4MB superpage translates");
+        check(r.paddr == 0x80400123, "MMU superpage paddr correct");
+
+        // Test 5: Superpage with offset in VPN[0] range
+        r = mmu.translate(0x00BFFF00, AccessType::LOAD, PRV_S, satp, 0);
+        check(!r.fault, "MMU superpage high offset translates");
+        check(r.paddr == 0x807FFF00, "MMU superpage high offset paddr");
+
+        // Test 6: Permission fault - U-mode page accessed from S-mode without SUM
+        mmu.flush_tlb();
+        r = mmu.translate(0x00400000, AccessType::LOAD, PRV_S, satp, 0);
+        check(r.fault, "MMU S-mode fault on U page without SUM");
+        check(r.cause == CAUSE_LOAD_PAGE_FAULT, "MMU load page fault cause");
+
+        // Test 7: SUM bit allows S-mode to access U pages
+        mmu.flush_tlb();
+        r = mmu.translate(0x00400000, AccessType::LOAD, PRV_S, satp, MSTATUS_SUM);
+        check(!r.fault, "MMU S-mode reads U page with SUM");
+
+        // Test 8: U-mode can't access S-mode page (superpage has no PTE_U)
+        mmu.flush_tlb();
+        r = mmu.translate(0x00800000, AccessType::LOAD, PRV_U, satp, 0);
+        check(r.fault, "MMU U-mode fault on S page");
+
+        // Test 9: Execute fault on non-executable page
+        // Make a read-only page: clear X bit
+        pmem[0x2000/4 + 0] = (target_ppn << PTE_PPN_SHIFT) | PTE_V | PTE_R | PTE_U;
+        mmu.flush_tlb();
+        r = mmu.translate(0x00400000, AccessType::FETCH, PRV_U, satp, 0);
+        check(r.fault, "MMU fetch fault on non-X page");
+        check(r.cause == CAUSE_FETCH_PAGE_FAULT, "MMU fetch page fault cause");
+
+        // Test 10: Write fault on read-only page
+        r = mmu.translate(0x00400000, AccessType::STORE, PRV_U, satp, 0);
+        check(r.fault, "MMU store fault on R-only page");
+        check(r.cause == CAUSE_STORE_PAGE_FAULT, "MMU store page fault cause");
+
+        // Restore full perms for remaining tests
+        pmem[0x2000/4 + 0] = (target_ppn << PTE_PPN_SHIFT) | PTE_V | PTE_R | PTE_W | PTE_X | PTE_U;
+
+        // Test 11: Invalid PTE (V=0) -> fault
+        pmem[0x1000/4 + 3] = 0; // root[3] = invalid
+        mmu.flush_tlb();
+        r = mmu.translate(0x00C00000, AccessType::LOAD, PRV_U, satp, 0);
+        check(r.fault, "MMU fault on invalid PTE");
+
+        // Test 12: Reserved encoding (R=0, W=1) -> fault
+        pmem[0x1000/4 + 3] = (0x90000 << PTE_PPN_SHIFT) | PTE_V | PTE_W;
+        mmu.flush_tlb();
+        r = mmu.translate(0x00C00000, AccessType::LOAD, PRV_U, satp, 0);
+        check(r.fault, "MMU fault on reserved R=0 W=1 encoding");
+
+        // Test 13: Misaligned superpage (PPN[0] != 0) -> fault
+        uint32_t bad_super_ppn = 0x80401; // PPN[0] = 1, not aligned
+        pmem[0x1000/4 + 4] = (bad_super_ppn << PTE_PPN_SHIFT) | PTE_V | PTE_R | PTE_W;
+        mmu.flush_tlb();
+        r = mmu.translate(0x01000000, AccessType::LOAD, PRV_S, satp, 0);
+        check(r.fault, "MMU fault on misaligned superpage");
+
+        // Test 14: Bare mode passthrough
+        uint32_t satp_bare = 0;
+        r = mmu.translate(0xDEADBEEF, AccessType::LOAD, PRV_M, satp_bare, 0);
+        check(!r.fault && r.paddr == 0xDEADBEEF, "MMU bare mode passthrough");
+
+        // Test 15: TLB caching (second access should hit TLB)
+        mmu.flush_tlb();
+        mmu.translate(0x00400000, AccessType::LOAD, PRV_U, satp, 0);
+        // Corrupt the PTE in memory, TLB should still have old mapping
+        uint32_t saved_pte = pmem[0x2000/4 + 0];
+        pmem[0x2000/4 + 0] = 0;
+        r = mmu.translate(0x00400000, AccessType::LOAD, PRV_U, satp, 0);
+        check(!r.fault, "MMU TLB hit after PTE corrupted");
+        check(r.paddr == 0x80000000, "MMU TLB returns correct paddr");
+        pmem[0x2000/4 + 0] = saved_pte; // restore
+
+        // Test 16: TLB flush invalidates
+        mmu.flush_tlb();
+        r = mmu.translate(0x00400000, AccessType::LOAD, PRV_U, satp, 0);
+        check(!r.fault, "MMU re-walks after TLB flush");
+
+        // Test 17: MXR allows load from execute-only page
+        pmem[0x2000/4 + 0] = (target_ppn << PTE_PPN_SHIFT) | PTE_V | PTE_X | PTE_U;
+        mmu.flush_tlb();
+        r = mmu.translate(0x00400000, AccessType::LOAD, PRV_U, satp, MSTATUS_MXR);
+        check(!r.fault, "MMU MXR allows load from X-only page");
+
+        // Without MXR, same page faults on load
+        mmu.flush_tlb();
+        r = mmu.translate(0x00400000, AccessType::LOAD, PRV_U, satp, 0);
+        check(r.fault, "MMU no MXR faults on X-only load");
+
+        // Restore
+        pmem[0x2000/4 + 0] = (target_ppn << PTE_PPN_SHIFT) | PTE_V | PTE_R | PTE_W | PTE_X | PTE_U;
+    }
+
     void step9_iss() {
         std::cout << "\nStep 9: ISS\n";
         using namespace rv32;
@@ -1743,6 +1897,7 @@ struct TestInitiator : public sc_core::sc_module {
         step5_csr();
         step6_execute();
         step7_trap();
+        step8_mmu();
         step9_iss();
         step10_elf_loader();
         step11_clint();
