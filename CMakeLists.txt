@@ -83,6 +83,9 @@ set(VP_SOURCES
     # Step 9: ISS (Instruction Set Simulator)
     src/cpu/iss.cpp
 
+    # Step 10: ELF Loader
+    src/util/elf_loader.cpp
+
     # Entry point
     src/main.cpp
 )

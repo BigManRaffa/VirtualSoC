@@ -19,6 +19,7 @@
 #include "cpu/rv32a.h"
 #include "cpu/trap.h"
 #include "cpu/iss.h"
+#include "util/elf_loader.h"
 
 static int pass_count = 0;
 static int fail_count = 0;
@@ -1351,6 +1352,85 @@ struct TestInitiator : public sc_core::sc_module {
         }
     }
 
+    void step10_elf_loader() {
+        std::cout << "\n--- Step 10: ELF Loader ---\n";
+
+        // Frankenstein a minimal ELF32 by hand. header + 1 phdr + 2 instructions
+        uint32_t code[] = { 0x02A00093, 0x00100073 }; // addi x1,x0,42; ebreak
+        std::vector<uint8_t> elf(52 + 32 + 8, 0);
+        auto w16 = [&](size_t off, uint16_t v) { std::memcpy(&elf[off], &v, 2); };
+        auto w32 = [&](size_t off, uint32_t v) { std::memcpy(&elf[off], &v, 4); };
+
+        elf[0] = 0x7F; elf[1] = 'E'; elf[2] = 'L'; elf[3] = 'F';
+        elf[4] = 1;    // ELFCLASS32
+        elf[5] = 1;    // ELFDATA2LSB
+        elf[6] = 1;    // EV_CURRENT
+
+        w16(16, 2);       // e_type = ET_EXEC
+        w16(18, 0xF3);    // e_machine = EM_RISCV
+        w32(20, 1);       // e_version
+        w32(24, 0x80000000); // e_entry
+        w32(28, 52);      // e_phoff (right after header)
+        w16(40, 52);      // e_ehsize
+        w16(42, 32);      // e_phentsize
+        w16(44, 1);       // e_phnum
+
+        size_t ph = 52;
+        w32(ph + 0, 1);          // p_type = PT_LOAD
+        w32(ph + 4, 84);         // p_offset = 52 + 32 = 84
+        w32(ph + 8, 0x80000000); // p_vaddr
+        w32(ph + 12, 0x80000000);// p_paddr
+        w32(ph + 16, 8);         // p_filesz
+        w32(ph + 20, 16);        // p_memsz (8 bytes bss)
+        w32(ph + 24, 5);         // p_flags = PF_R|PF_X
+
+        std::memcpy(&elf[84], code, 8);
+
+        std::vector<uint8_t> mem(256, 0xFF);
+        uint32_t mem_base = 0x80000000;
+
+        auto write_fn = [&](uint32_t paddr, const uint8_t* data, size_t len) {
+            uint32_t off = paddr - mem_base;
+            std::memcpy(&mem[off], data, len);
+        };
+
+        ElfLoadResult r = load_elf_from_memory(elf.data(), elf.size(), write_fn);
+
+        check(r.entry_point == 0x80000000, "ELF entry point");
+        check(r.segments_loaded == 1, "ELF 1 PT_LOAD segment");
+        check(r.load_min == 0x80000000, "ELF load_min");
+        check(r.load_max == 0x80000010, "ELF load_max (includes bss)");
+
+        uint32_t loaded_instr;
+        std::memcpy(&loaded_instr, &mem[0], 4);
+        check(loaded_instr == 0x02A00093, "ELF code loaded correctly");
+
+        uint32_t bss_val;
+        std::memcpy(&bss_val, &mem[8], 4);
+        check(bss_val == 0, "ELF bss zeroed");
+
+        std::vector<uint8_t> bad_elf = elf;
+        bad_elf[0] = 0x00;
+        bool caught = false;
+        try { load_elf_from_memory(bad_elf.data(), bad_elf.size(), write_fn); }
+        catch (const std::runtime_error&) { caught = true; }
+        check(caught, "ELF rejects bad magic");
+
+        bad_elf = elf;
+        bad_elf[18] = 0x03; bad_elf[19] = 0x00;
+        caught = false;
+        try { load_elf_from_memory(bad_elf.data(), bad_elf.size(), write_fn); }
+        catch (const std::runtime_error&) { caught = true; }
+        check(caught, "ELF rejects non-RISC-V");
+
+        bad_elf = elf;
+        bad_elf[4] = 2;
+        caught = false;
+        try { load_elf_from_memory(bad_elf.data(), bad_elf.size(), write_fn); }
+        catch (const std::runtime_error&) { caught = true; }
+        check(caught, "ELF rejects 64-bit");
+    }
+
     void run_tests() {
         step1_memory();
         step2_bus();
@@ -1360,6 +1440,7 @@ struct TestInitiator : public sc_core::sc_module {
         step6_execute();
         step7_trap();
         step9_iss();
+        step10_elf_loader();
         sc_core::sc_stop();
     }
 };
