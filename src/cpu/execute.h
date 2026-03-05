@@ -32,6 +32,10 @@ struct ExecResult {
     bool     exception = false;
     uint32_t cause     = 0;
     uint32_t tval      = 0;
+
+    bool wfi       = false;
+    bool fence_i   = false;
+    bool sfence_vma = false;
 };
 
 ExecResult execute(CPUState& s, const DecodedInstr& d);

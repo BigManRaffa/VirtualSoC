@@ -286,18 +286,22 @@ ExecResult execute(CPUState& s, const DecodedInstr& d) {
     case InstrType::URET:
         return make_exception(CAUSE_ILLEGAL_INSTR, d.raw);
 
-    case InstrType::WFI:
-        break;
+    case InstrType::WFI: {
+        ExecResult wfi_r;
+        wfi_r.wfi = true;
+        return wfi_r;
+    }
 
     case InstrType::SFENCE_VMA:
         if (s.priv < PRV_S) return make_exception(CAUSE_ILLEGAL_INSTR, d.raw);
         if (s.csr.mstatus & MSTATUS_TVM && s.priv == PRV_S)
             return make_exception(CAUSE_ILLEGAL_INSTR, d.raw);
-        break;
+        { ExecResult sfence_r; sfence_r.sfence_vma = true; return sfence_r; }
 
     case InstrType::FENCE:
-    case InstrType::FENCEI:
         break;
+    case InstrType::FENCEI:
+        { ExecResult fi_r; fi_r.fence_i = true; return fi_r; }
 
     case InstrType::ILLEGAL:
         return make_exception(CAUSE_ILLEGAL_INSTR, d.raw);

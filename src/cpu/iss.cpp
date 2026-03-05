@@ -15,12 +15,63 @@ ISS::ISS(sc_core::sc_module_name name, uint32_t reset_pc)
 
     isock.register_invalidate_direct_mem_ptr(this, &ISS::invalidate_dmi);
 
-    state.mem.read = [this](uint32_t addr, int bytes) {
-        return bus_read(addr, bytes);
+    mmu.mem_read = [this](uint32_t paddr) -> uint32_t {
+        return bus_read(paddr, 4);
     };
-    state.mem.write = [this](uint32_t addr, uint32_t data, int bytes) {
-        bus_write(addr, data, bytes);
+    mmu.mem_write = [this](uint32_t paddr, uint32_t val) {
+        bus_write(paddr, val, 4);
     };
+
+    state.csr.on_satp_write = [this]() { mmu.flush_tlb(); };
+
+    state.mem.read = [this](uint32_t vaddr, int bytes) -> uint32_t {
+        uint32_t paddr = vaddr;
+        if (mmu_active_data()) {
+            auto r = mmu.translate(vaddr, AccessType::LOAD,
+                                   effective_data_priv(),
+                                   state.csr.satp, state.csr.mstatus);
+            if (r.fault) {
+                mem_fault_ = true;
+                mem_fault_cause_ = r.cause;
+                mem_fault_vaddr_ = vaddr;
+                return 0;
+            }
+            paddr = r.paddr;
+        }
+        return bus_read(paddr, bytes);
+    };
+
+    state.mem.write = [this](uint32_t vaddr, uint32_t data, int bytes) {
+        uint32_t paddr = vaddr;
+        if (mmu_active_data()) {
+            auto r = mmu.translate(vaddr, AccessType::STORE,
+                                   effective_data_priv(),
+                                   state.csr.satp, state.csr.mstatus);
+            if (r.fault) {
+                mem_fault_ = true;
+                mem_fault_cause_ = r.cause;
+                mem_fault_vaddr_ = vaddr;
+                return;
+            }
+            paddr = r.paddr;
+        }
+        bus_write(paddr, data, bytes);
+    };
+}
+
+bool ISS::mmu_active_fetch() const {
+    return (state.csr.satp >> 31) != 0 && state.priv < 3;
+}
+
+bool ISS::mmu_active_data() const {
+    return (state.csr.satp >> 31) != 0 && effective_data_priv() < 3;
+}
+
+// M-mode with MPRV uses MPP for data access privilege
+uint8_t ISS::effective_data_priv() const {
+    if (state.priv == 3 && (state.csr.mstatus & rv32::MSTATUS_MPRV))
+        return (state.csr.mstatus >> rv32::MSTATUS_MPP_SHIFT) & 0x3;
+    return state.priv;
 }
 
 void ISS::run() {
@@ -45,25 +96,62 @@ void ISS::run() {
             continue;
         }
 
-        uint32_t raw = bus_read(state.pc, 4);
-        DecodedInstr d = decode(raw);
+        uint32_t fetch_paddr = state.pc;
+        if (mmu_active_fetch()) {
+            auto r = mmu.translate(state.pc, AccessType::FETCH, state.priv,
+                                   state.csr.satp, state.csr.mstatus);
+            if (r.fault) {
+                trap::take_trap(state, r.cause, state.pc);
+                state.pc = state.next_pc;
+                continue;
+            }
+            fetch_paddr = r.paddr;
+        }
+        uint32_t raw = bus_read(fetch_paddr, 4);
 
+        DecodedInstr d = decode(raw);
         state.next_pc = state.pc + d.instr_len();
 
+        mem_fault_ = false;
         ExecResult r = execute(state, d);
+
+        if (mem_fault_) {
+            mem_fault_ = false;
+            trap::take_trap(state, mem_fault_cause_, mem_fault_vaddr_);
+            state.pc = state.next_pc;
+            qk.inc(clk_period_);
+            if (qk.need_sync()) qk.sync();
+            continue;
+        }
 
         insn_count++;
         state.csr.inc_mcycle();
         state.csr.inc_minstret();
 
+        // 7. Handle execution exceptions
         if (r.exception) {
             if (stop_on_ebreak && r.cause == rv32::CAUSE_BREAKPOINT)
                 return;
             trap::take_trap(state, r.cause, r.tval);
         }
 
+        // 8. Handle special instructions
+        if (r.wfi) {
+            qk.sync();
+            wait(sc_core::sc_time(cfg::DEFAULT_QUANTUM_US, sc_core::SC_US),
+                 wfi_event_);
+            qk.reset();
+        }
+        if (r.fence_i) {
+            dmi_valid_ = false;
+            dmi_ptr_ = nullptr;
+        }
+        if (r.sfence_vma)
+            mmu.flush_tlb();
+
         state.pc = state.next_pc;
 
+        // 9. Advance time
         qk.inc(clk_period_);
         if (qk.need_sync())
             qk.sync();
